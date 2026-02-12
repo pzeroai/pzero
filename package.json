@@ -1,0 +1,16 @@
+{
+  "name": "p0",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "bun run --cwd apps/api dev & bun run --cwd apps/web dev",
+    "dev:api": "bun run --cwd apps/api dev",
+    "dev:web": "bun run --cwd apps/web dev",
+    "build": "bun run --cwd apps/web build",
+    "test": "bun test apps/api/src/__tests__/",
+    "setup-data": "bash scripts/install-tools.sh && bash scripts/download.sh"
+  },
+  "trustedDependencies": [
+    "protobufjs"
+  ]
+}

@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+/* Chat scrollbar */
+.chat-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-scroll::-webkit-scrollbar-thumb {
+  background: rgb(63 63 70);
+  border-radius: 0;
+}
+.chat-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(82 82 91);
+}
+
+/* react-grid-layout styles */
+.react-grid-layout {
+  position: relative;
+  transition: height 200ms ease;
+}
+
+.react-grid-item {
+  transition: all 200ms ease;
+  transition-property: left, top, width, height;
+}
+
+.react-grid-item.cssTransforms {
+  transition-property: transform, width, height;
+}
+
+.react-grid-item.resizing {
+  opacity: 0.9;
+  z-index: 3;
+}
+
+.react-grid-item.react-draggable-dragging {
+  transition: none;
+  z-index: 3;
+  will-change: transform;
+}
+
+.react-grid-placeholder {
+  background: rgb(34 197 94 / 0.15);
+  border: 2px dashed rgb(34 197 94 / 0.4);
+  border-radius: 0;
+  opacity: 1;
+  transition-duration: 100ms;
+  z-index: 2;
+}
+
+.react-resizable-handle {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  bottom: 0;
+  right: 0;
+  cursor: se-resize;
+}
+
+.react-resizable-handle::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid rgb(113 113 122 / 0.5);
+  border-bottom: 2px solid rgb(113 113 122 / 0.5);
+}

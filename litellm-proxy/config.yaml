@@ -1,0 +1,44 @@
+general_settings:
+  disable_spend_logs: true
+  disable_master_key_return: true
+
+model_list:
+  # OpenAI
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Anthropic
+  - model_name: claude-sonnet-4-5-20250929
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5-20250929
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Google Gemini
+  - model_name: gemini-3-pro
+    litellm_params:
+      model: gemini/gemini-3-pro-preview
+      api_key: os.environ/GEMINI_API_KEY
+
+  # Local models (Ollama)
+  - model_name: llama3
+    litellm_params:
+      model: ollama/llama3
+      api_base: http://localhost:11434
+
+  - model_name: "gemini-3-pro-vertex"
+    litellm_params:
+      model: "vertex_ai/gemini-3-pro-preview"
+      vertex_project: os.environ/GOOGLE_VERTEX_PROJECT
+      vertex_location: os.environ/GOOGLE_VERTEX_LOCATION
