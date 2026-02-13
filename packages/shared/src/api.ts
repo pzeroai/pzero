@@ -1,8 +1,9 @@
 export interface ChartConfig {
-  type: "bar" | "line" | "scatter" | "area" | "pie" | "heatmap" | "histogram";
+  type: "bar" | "line" | "scatter" | "area" | "pie" | "heatmap" | "histogram" | "table";
   x: string;
   y: string;
   series?: string;
+  columns?: Array<{ key: string; label: string }>;
   title: string;
   xLabel: string;
   yLabel: string;

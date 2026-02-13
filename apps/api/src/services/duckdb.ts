@@ -1,7 +1,7 @@
 import duckdb from "duckdb";
 import path from "path";
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR || "./data");
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(import.meta.dir, "../../../../data"));
 
 const KALSHI_DIR = path.join(DATA_DIR, "kalshi");
 const MARKETS_DIR = path.join(KALSHI_DIR, "markets");

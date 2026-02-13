@@ -128,6 +128,68 @@ export async function createMaterializedViews() {
     ORDER BY 1
   `, 600_000);
 
+  // Polymarket: trader-level summary (volume + P&L on resolved markets)
+  console.log("  mv_pm_trader_summary...");
+  await duckdbService.query(`
+    CREATE TABLE IF NOT EXISTS mv_pm_trader_summary AS
+    WITH resolved_tokens AS (
+      SELECT yes_token AS token_id, true AS is_yes, winning_outcome, question
+      FROM mv_pm_resolved_markets
+      UNION ALL
+      SELECT no_token AS token_id, false AS is_yes, winning_outcome, question
+      FROM mv_pm_resolved_markets
+    ),
+    trader_trades AS (
+      -- Taker side: taker gives USDC (maker_asset_id=0) or receives USDC
+      SELECT
+        t.taker AS address,
+        'taker' AS role,
+        CASE WHEN t.maker_asset_id = '0'
+          THEN -CAST(t.maker_amount AS BIGINT)
+          ELSE CAST(t.taker_amount AS BIGINT)
+        END AS usdc_flow,
+        CASE WHEN t.maker_asset_id = '0'
+          THEN CAST(t.taker_amount AS BIGINT)
+          ELSE -CAST(t.maker_amount AS BIGINT)
+        END AS token_flow,
+        CASE WHEN t.maker_asset_id = '0' THEN t.taker_asset_id ELSE t.maker_asset_id END AS token_id
+      FROM '${PM_TRADES_DIR}/*.parquet' t
+      WHERE t.maker_asset_id != t.taker_asset_id
+      UNION ALL
+      -- Maker side
+      SELECT
+        t.maker AS address,
+        'maker' AS role,
+        CASE WHEN t.maker_asset_id = '0'
+          THEN -CAST(t.maker_amount AS BIGINT)
+          ELSE CAST(t.taker_amount AS BIGINT)
+        END AS usdc_flow,
+        CASE WHEN t.maker_asset_id = '0'
+          THEN CAST(t.taker_amount AS BIGINT)
+          ELSE -CAST(t.maker_amount AS BIGINT)
+        END AS token_flow,
+        CASE WHEN t.maker_asset_id = '0' THEN t.taker_asset_id ELSE t.maker_asset_id END AS token_id
+      FROM '${PM_TRADES_DIR}/*.parquet' t
+      WHERE t.maker_asset_id != t.taker_asset_id
+    )
+    SELECT
+      tt.address,
+      COUNT(*) AS trade_count,
+      SUM(ABS(tt.usdc_flow)) / 1e6 AS total_volume_usd,
+      SUM(CASE
+        WHEN rt.token_id IS NOT NULL THEN
+          CASE
+            WHEN (rt.is_yes AND rt.winning_outcome = 'Yes') OR (NOT rt.is_yes AND rt.winning_outcome = 'No')
+            THEN tt.token_flow / 1e6
+            ELSE 0
+          END + tt.usdc_flow / 1e6
+        ELSE 0
+      END) AS realized_pnl_usd
+    FROM trader_trades tt
+    LEFT JOIN resolved_tokens rt ON CAST(tt.token_id AS VARCHAR) = rt.token_id
+    GROUP BY 1
+  `, 600_000);
+
   // Polymarket: market summary
   console.log("  mv_pm_market_summary...");
   await duckdbService.query(`
