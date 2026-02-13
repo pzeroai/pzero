@@ -2,7 +2,7 @@
   "name": "@p0/api",
   "version": "0.0.1",
   "scripts": {
-    "dev": "bun --watch src/server.ts"
+    "dev": "bun --env-file=../../.env --watch src/server.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

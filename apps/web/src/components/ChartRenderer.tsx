@@ -1,4 +1,5 @@
 import type { ChartConfig } from "@p0/shared";
+import TableRenderer from "./TableRenderer";
 import {
   BarChart, Bar, LineChart, Line, ScatterChart, Scatter,
   AreaChart, Area, PieChart, Pie, Cell,
@@ -94,6 +95,10 @@ export default function ChartRenderer({ config, data }: Props) {
 
   if (!data.length) {
     return <div className="flex items-center justify-center h-full text-zinc-500">No data</div>;
+  }
+
+  if (type === "table") {
+    return <TableRenderer config={config} data={data} />;
   }
 
   const dateTick = getDateTickConfig(data, x);

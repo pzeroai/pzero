@@ -110,6 +110,8 @@ Each row = an OrderFilled event from the Polygon blockchain. ~40K+ files.
 
 Note: Amounts are in USDC with 6 decimals. Divide by 1e6 to get USD.
 
+**IMPORTANT:** maker_asset_id and taker_asset_id are uint256 token IDs that can be extremely large integers. Always cast them to VARCHAR for comparisons: \`CAST(t.maker_asset_id AS VARCHAR)\`. Comparing them as integers will cause overflow errors.
+
 #### Polymarket Blocks (timestamp lookup)
 Location: '{pm_blocks_dir}/*.parquet'
 Maps Polygon block numbers to timestamps. JOIN with trades to get trade times.
@@ -157,6 +159,8 @@ Trades from the legacy Fixed Product Market Maker contracts.
   | status (string) | market_count (int) | total_volume (float) | total_liquidity (float) |
 - **mv_pm_resolved_markets** — Polymarket resolved markets with token IDs and winning outcome
   | id (string) | question (string) | yes_token (string) | no_token (string) | yes_final_price (double) | no_final_price (double) | winning_outcome (string) | volume (float) | created_at (datetime) |
+- **mv_pm_trader_summary** — Polymarket trader-level aggregates (address, volume, P&L on resolved markets)
+  | address (string) | trade_count (int) | total_volume_usd (double) | realized_pnl_usd (double) |
 - **mv_pm_calibration** — Polymarket win rate by price (for calibration charts). Price is in cents (1-99), normalized to match Kalshi scale.
   | price (int) | trade_count (int) | won_trades (int) |
 
@@ -250,6 +254,7 @@ ORDER BY day
 6. Use LIMIT if returning raw rows.
 7. For time series, truncate to appropriate granularity (DATE_TRUNC).
 8. Use the "series" field to compare multiple groups on one chart (e.g. multi-line line charts, grouped bar charts). The SQL should return the grouping column alongside x and y.
+9. Use type "table" for ranked lists, leaderboards, top-N queries, or when the user asks for specific rows/records (e.g. "top 50 traders", "most profitable", "list all markets matching..."). For tables, set x and y to empty strings. Optionally provide a "columns" array with {key, label} objects to control which columns are displayed and their header labels.
 
 ## EXISTING DASHBOARD WIDGETS
 The user's dashboard may already have charts. When you receive a message, the system will inject a list of existing widgets as a system message in the conversation. Each widget has an "id" and a "title".
@@ -261,10 +266,11 @@ Respond with a JSON object matching this schema:
 {
   "sql": "SELECT ... FROM ...",
   "chart": {
-    "type": "bar|line|scatter|area|pie|heatmap|histogram",
+    "type": "bar|line|scatter|area|pie|heatmap|histogram|table",
     "x": "column_name",
     "y": "column_name",
     "series": "optional_grouping_column (use for multi-line or grouped bar charts)",
+    "columns": [{"key": "column_name", "label": "Display Label"}],
     "title": "Chart Title",
     "xLabel": "X Axis Label",
     "yLabel": "Y Axis Label"

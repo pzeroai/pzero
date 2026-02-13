@@ -125,7 +125,7 @@ export default function WidgetCard({ widget }: { widget: Widget }) {
               ref={inputRef}
               value={refineInput}
               onChange={(e) => setRefineInput(e.target.value)}
-              placeholder="e.g. filter to Sports, make it a line chart..."
+              placeholder="e.g. filter to Sports, make it a table, sort by volume..."
               disabled={loading}
               className="flex-1 bg-zinc-900 border border-zinc-700 rounded-none px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-green-500 disabled:opacity-50"
             />
