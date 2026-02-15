@@ -8,7 +8,9 @@
     "dev:web": "bun run --cwd apps/web dev",
     "build": "bun run --cwd apps/web build",
     "test": "bun test apps/api/src/__tests__/",
-    "setup-data": "bash scripts/install-tools.sh && bash scripts/download.sh"
+    "setup-data": "bash scripts/install-tools.sh && bash scripts/download.sh",
+    "index": "bun run --cwd apps/indexer index",
+    "scheduler": "bun run --cwd apps/indexer scheduler"
   },
   "trustedDependencies": [
     "protobufjs"
