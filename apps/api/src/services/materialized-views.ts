@@ -1,7 +1,40 @@
 import { duckdbService, MARKETS_DIR, TRADES_DIR, PM_MARKETS_DIR, PM_TRADES_DIR, PM_BLOCKS_DIR } from "./duckdb";
+import { existsSync, mkdirSync, rmSync } from "fs";
+import { join } from "path";
+
+async function hasParquetColumn(parquetGlob: string, column: string): Promise<boolean> {
+  try {
+    await duckdbService.query(
+      `SELECT "${column}" FROM read_parquet('${parquetGlob}', union_by_name=true) LIMIT 1`,
+      30_000,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export async function createMaterializedViews() {
   console.log("Creating materialized views...");
+
+  const pmMarketsGlob = `${PM_MARKETS_DIR}/*.parquet`;
+  const pmTradesGlob = `${PM_TRADES_DIR}/*.parquet`;
+  const pmBlocksGlob = `${PM_BLOCKS_DIR}/*.parquet`;
+  const pmDerivedDir = join(PM_TRADES_DIR, "..", "derived");
+  const pmTradesWithTsParquet = join(pmDerivedDir, "pm_trades_with_ts.parquet");
+  const forceRebuildPmTradesWithTs = process.env.PM_REBUILD_TRADES_WITH_TS === "true";
+
+  mkdirSync(pmDerivedDir, { recursive: true });
+
+  const pmHasCategory = await hasParquetColumn(pmMarketsGlob, "category");
+  const pmHasTags = await hasParquetColumn(pmMarketsGlob, "tags");
+  const pmHasContract = await hasParquetColumn(pmTradesGlob, "_contract");
+
+  const pmCategoryExpr = pmHasCategory
+    ? "COALESCE(NULLIF(category, ''), 'uncategorized')"
+    : "NULL::VARCHAR";
+  const pmTagsExpr = pmHasTags ? "COALESCE(NULLIF(tags, ''), '[]')" : "'[]'";
+  const pmContractExpr = pmHasContract ? "t._contract AS _contract" : "NULL::VARCHAR AS _contract";
 
   await duckdbService.query(`
     CREATE TABLE IF NOT EXISTS mv_daily_volume AS
@@ -60,6 +93,161 @@ export async function createMaterializedViews() {
     ORDER BY 1
   `, 600_000);
 
+  // Polymarket: token-normalized market mapping (token_id -> market/outcome metadata)
+  console.log("  mv_pm_market_tokens...");
+  await duckdbService.query(`
+    CREATE TABLE IF NOT EXISTS mv_pm_market_tokens AS
+    WITH base AS (
+      SELECT
+        id AS market_id,
+        condition_id,
+        question,
+        slug,
+        ${pmCategoryExpr} AS category,
+        ${pmTagsExpr} AS tags,
+        COALESCE(NULLIF(outcomes, ''), '[]') AS outcomes_json,
+        COALESCE(NULLIF(clob_token_ids, ''), '[]') AS token_ids_json,
+        active,
+        closed,
+        end_date,
+        created_at,
+        volume,
+        liquidity
+      FROM read_parquet('${pmMarketsGlob}', union_by_name=true)
+    ),
+    expanded AS (
+      SELECT
+        b.*,
+        r.i AS outcome_index
+      FROM base b
+      CROSS JOIN LATERAL range(
+        CAST(0 AS BIGINT),
+        GREATEST(
+          COALESCE(TRY_CAST(json_array_length(b.token_ids_json) AS BIGINT), 0),
+          COALESCE(TRY_CAST(json_array_length(b.outcomes_json) AS BIGINT), 0)
+        )
+      ) AS r(i)
+    ),
+    normalized AS (
+      SELECT
+        market_id,
+        condition_id,
+        question,
+        slug,
+        category,
+        tags,
+        CAST(outcome_index AS INTEGER) AS outcome_index,
+        json_extract_string(outcomes_json, '$[' || CAST(outcome_index AS VARCHAR) || ']') AS outcome_name,
+        json_extract_string(token_ids_json, '$[' || CAST(outcome_index AS VARCHAR) || ']') AS token_id,
+        active,
+        closed,
+        end_date,
+        created_at,
+        volume,
+        liquidity
+      FROM expanded
+    )
+    SELECT *
+    FROM normalized
+    WHERE token_id IS NOT NULL AND token_id != ''
+  `, 600_000);
+
+  const pmTradesWithTsSelect = `
+    SELECT
+      t.block_number,
+      b.timestamp AS timestamp,
+      t.transaction_hash,
+      t.log_index,
+      t.order_hash,
+      t.maker,
+      t.taker,
+      CAST(t.maker_asset_id AS VARCHAR) AS maker_asset_id,
+      CAST(t.taker_asset_id AS VARCHAR) AS taker_asset_id,
+      t.maker_amount,
+      t.taker_amount,
+      t.fee,
+      ${pmContractExpr},
+      CASE
+        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
+        THEN CAST(t.taker_asset_id AS VARCHAR)
+        ELSE CAST(t.maker_asset_id AS VARCHAR)
+      END AS token_id,
+      CASE
+        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
+        THEN t.maker_amount
+        ELSE t.taker_amount
+      END AS usdc_amount,
+      CASE
+        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
+        THEN t.taker_amount
+        ELSE t.maker_amount
+      END AS token_amount,
+      CASE
+        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
+        THEN 'buy'
+        ELSE 'sell'
+      END AS taker_side
+    FROM read_parquet('${pmTradesGlob}', union_by_name=true) t
+    INNER JOIN read_parquet('${pmBlocksGlob}', union_by_name=true) b
+      ON t.block_number = b.block_number
+    WHERE CAST(t.maker_asset_id AS VARCHAR) != CAST(t.taker_asset_id AS VARCHAR)
+  `;
+
+  // Polymarket: prejoined trades + timestamps + normalized token id.
+  // Persisted as parquet so API restarts don't re-run the heavy trades+blocks join.
+  console.log("  mv_pm_trades_with_ts...");
+  try {
+    if (!existsSync(pmTradesWithTsParquet) || forceRebuildPmTradesWithTs) {
+      if (forceRebuildPmTradesWithTs) {
+        console.log("    PM_REBUILD_TRADES_WITH_TS=true -> rebuilding derived parquet");
+        rmSync(pmTradesWithTsParquet, { force: true });
+      } else {
+        console.log("    Building derived parquet (first run)");
+      }
+      await duckdbService.query(
+        `COPY (${pmTradesWithTsSelect}) TO '${pmTradesWithTsParquet}' (FORMAT PARQUET, COMPRESSION ZSTD)`,
+        1_800_000,
+      );
+    }
+    await duckdbService.query(
+      `CREATE VIEW IF NOT EXISTS mv_pm_trades_with_ts AS SELECT * FROM read_parquet('${pmTradesWithTsParquet}', union_by_name=true)`,
+      120_000,
+    );
+  } catch (err) {
+    console.warn(
+      "  mv_pm_trades_with_ts derived parquet build failed; using raw join view:",
+      (err as Error).message,
+    );
+    await duckdbService.query(
+      `CREATE VIEW IF NOT EXISTS mv_pm_trades_with_ts AS ${pmTradesWithTsSelect}`,
+      120_000,
+    );
+  }
+
+  // Polymarket: enriched trades with market/outcome metadata via token_id equi-join.
+  console.log("  mv_pm_trades_enriched...");
+  await duckdbService.query(`
+    CREATE VIEW IF NOT EXISTS mv_pm_trades_enriched AS
+    SELECT
+      t.*,
+      m.market_id,
+      m.condition_id,
+      m.question,
+      m.slug,
+      m.category,
+      m.tags,
+      m.outcome_index,
+      m.outcome_name,
+      m.active AS market_active,
+      m.closed AS market_closed,
+      m.end_date AS market_end_date,
+      m.created_at AS market_created_at,
+      m.volume AS market_volume,
+      m.liquidity AS market_liquidity
+    FROM mv_pm_trades_with_ts t
+    INNER JOIN mv_pm_market_tokens m ON t.token_id = m.token_id
+  `, 120_000);
+
   // Polymarket: resolved markets with token mapping
   console.log("  mv_pm_resolved_markets...");
   await duckdbService.query(`
@@ -71,7 +259,7 @@ export async function createMaterializedViews() {
            CAST(json_extract_string(outcome_prices, '$[1]') AS DOUBLE) AS no_final_price,
            CASE WHEN CAST(json_extract_string(outcome_prices, '$[0]') AS DOUBLE) > 0.99 THEN 'Yes' ELSE 'No' END AS winning_outcome,
            volume, created_at
-    FROM '${PM_MARKETS_DIR}/*.parquet'
+    FROM read_parquet('${pmMarketsGlob}', union_by_name=true)
     WHERE closed = true
     AND (CAST(json_extract_string(outcome_prices, '$[0]') AS DOUBLE) > 0.99
       OR CAST(json_extract_string(outcome_prices, '$[1]') AS DOUBLE) > 0.99)
@@ -88,22 +276,17 @@ export async function createMaterializedViews() {
     FROM mv_pm_resolved_markets
   `, 120_000);
 
-  // Polymarket: calibration — win rate by price bucket (equi-join via token lookup)
+  // Polymarket: calibration — win rate by price bucket.
   console.log("  mv_pm_calibration...");
   await duckdbService.query(`
     CREATE TABLE IF NOT EXISTS mv_pm_calibration AS
     WITH trades_priced AS (
       SELECT
-        CASE
-          WHEN t.maker_asset_id = '0' THEN ROUND(t.maker_amount * 100.0 / t.taker_amount)
-          ELSE ROUND(t.taker_amount * 100.0 / t.maker_amount)
-        END AS price,
-        COALESCE(lk_taker.won, lk_maker.won) AS won
-      FROM '${PM_TRADES_DIR}/*.parquet' t
-      LEFT JOIN mv_pm_token_lookup lk_taker ON t.taker_asset_id = lk_taker.token_id
-      LEFT JOIN mv_pm_token_lookup lk_maker ON t.maker_asset_id = lk_maker.token_id
-      WHERE (lk_taker.token_id IS NOT NULL OR lk_maker.token_id IS NOT NULL)
-        AND t.maker_asset_id != t.taker_asset_id
+        ROUND(t.usdc_amount * 100.0 / NULLIF(t.token_amount, 0)) AS price,
+        lk.won
+      FROM mv_pm_trades_with_ts t
+      INNER JOIN mv_pm_token_lookup lk ON t.token_id = lk.token_id
+      WHERE t.token_amount > 0
     )
     SELECT
       price,
@@ -115,15 +298,14 @@ export async function createMaterializedViews() {
     ORDER BY 1
   `, 600_000);
 
-  // Polymarket: daily volume (join trades with blocks for timestamps)
+  // Polymarket: daily volume (uses prejoined trades+timestamp view)
   console.log("  mv_pm_daily_volume...");
   await duckdbService.query(`
     CREATE TABLE IF NOT EXISTS mv_pm_daily_volume AS
-    SELECT DATE_TRUNC('day', b.timestamp::TIMESTAMP) AS day,
+    SELECT DATE_TRUNC('day', timestamp::TIMESTAMP) AS day,
            COUNT(*) AS trade_count,
-           SUM(CASE WHEN t.maker_asset_id = '0' THEN t.maker_amount ELSE t.taker_amount END) AS volume_usdc
-    FROM '${PM_TRADES_DIR}/*.parquet' t
-    INNER JOIN '${PM_BLOCKS_DIR}/*.parquet' b ON t.block_number = b.block_number
+           SUM(usdc_amount) AS volume_usdc
+    FROM mv_pm_trades_with_ts
     GROUP BY 1
     ORDER BY 1
   `, 600_000);
@@ -133,60 +315,56 @@ export async function createMaterializedViews() {
   await duckdbService.query(`
     CREATE TABLE IF NOT EXISTS mv_pm_trader_summary AS
     WITH resolved_tokens AS (
-      SELECT yes_token AS token_id, true AS is_yes, winning_outcome, question
+      SELECT yes_token AS token_id, true AS is_yes, winning_outcome
       FROM mv_pm_resolved_markets
       UNION ALL
-      SELECT no_token AS token_id, false AS is_yes, winning_outcome, question
+      SELECT no_token AS token_id, false AS is_yes, winning_outcome
       FROM mv_pm_resolved_markets
     ),
-    trader_trades AS (
-      -- Taker side: taker gives USDC (maker_asset_id=0) or receives USDC
+    trader_flows AS (
       SELECT
         t.taker AS address,
         'taker' AS role,
-        CASE WHEN t.maker_asset_id = '0'
-          THEN -CAST(t.maker_amount AS BIGINT)
-          ELSE CAST(t.taker_amount AS BIGINT)
+        CASE WHEN t.taker_side = 'buy'
+          THEN -CAST(t.usdc_amount AS BIGINT)
+          ELSE CAST(t.usdc_amount AS BIGINT)
         END AS usdc_flow,
-        CASE WHEN t.maker_asset_id = '0'
-          THEN CAST(t.taker_amount AS BIGINT)
-          ELSE -CAST(t.maker_amount AS BIGINT)
+        CASE WHEN t.taker_side = 'buy'
+          THEN CAST(t.token_amount AS BIGINT)
+          ELSE -CAST(t.token_amount AS BIGINT)
         END AS token_flow,
-        CASE WHEN t.maker_asset_id = '0' THEN t.taker_asset_id ELSE t.maker_asset_id END AS token_id
-      FROM '${PM_TRADES_DIR}/*.parquet' t
-      WHERE t.maker_asset_id != t.taker_asset_id
+        t.token_id
+      FROM mv_pm_trades_with_ts t
       UNION ALL
-      -- Maker side
       SELECT
         t.maker AS address,
         'maker' AS role,
-        CASE WHEN t.maker_asset_id = '0'
-          THEN -CAST(t.maker_amount AS BIGINT)
-          ELSE CAST(t.taker_amount AS BIGINT)
+        CASE WHEN t.taker_side = 'buy'
+          THEN CAST(t.usdc_amount AS BIGINT)
+          ELSE -CAST(t.usdc_amount AS BIGINT)
         END AS usdc_flow,
-        CASE WHEN t.maker_asset_id = '0'
-          THEN CAST(t.taker_amount AS BIGINT)
-          ELSE -CAST(t.maker_amount AS BIGINT)
+        CASE WHEN t.taker_side = 'buy'
+          THEN -CAST(t.token_amount AS BIGINT)
+          ELSE CAST(t.token_amount AS BIGINT)
         END AS token_flow,
-        CASE WHEN t.maker_asset_id = '0' THEN t.taker_asset_id ELSE t.maker_asset_id END AS token_id
-      FROM '${PM_TRADES_DIR}/*.parquet' t
-      WHERE t.maker_asset_id != t.taker_asset_id
+        t.token_id
+      FROM mv_pm_trades_with_ts t
     )
     SELECT
-      tt.address,
+      tf.address,
       COUNT(*) AS trade_count,
-      SUM(ABS(tt.usdc_flow)) / 1e6 AS total_volume_usd,
+      SUM(ABS(tf.usdc_flow)) / 1e6 AS total_volume_usd,
       SUM(CASE
         WHEN rt.token_id IS NOT NULL THEN
           CASE
             WHEN (rt.is_yes AND rt.winning_outcome = 'Yes') OR (NOT rt.is_yes AND rt.winning_outcome = 'No')
-            THEN tt.token_flow / 1e6
+            THEN tf.token_flow / 1e6
             ELSE 0
-          END + tt.usdc_flow / 1e6
+          END + tf.usdc_flow / 1e6
         ELSE 0
       END) AS realized_pnl_usd
-    FROM trader_trades tt
-    LEFT JOIN resolved_tokens rt ON CAST(tt.token_id AS VARCHAR) = rt.token_id
+    FROM trader_flows tf
+    LEFT JOIN resolved_tokens rt ON tf.token_id = rt.token_id
     GROUP BY 1
   `, 600_000);
 
@@ -199,7 +377,7 @@ export async function createMaterializedViews() {
       COUNT(*) AS market_count,
       SUM(volume) AS total_volume,
       SUM(liquidity) AS total_liquidity
-    FROM '${PM_MARKETS_DIR}/*.parquet'
+    FROM read_parquet('${pmMarketsGlob}', union_by_name=true)
     GROUP BY 1
   `, 120_000);
 
