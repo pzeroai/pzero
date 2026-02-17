@@ -1,0 +1,15 @@
+[Unit]
+Description=p0 Indexer Scheduler
+After=network.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=__BUN_BIN__ run scheduler
+Restart=always
+RestartSec=30
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
