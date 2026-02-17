@@ -1,5 +1,5 @@
 import { duckdbService, MARKETS_DIR, TRADES_DIR, PM_MARKETS_DIR, PM_TRADES_DIR, PM_BLOCKS_DIR } from "./duckdb";
-import { existsSync, mkdirSync, rmSync } from "fs";
+import { existsSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
 
 async function hasParquetColumn(parquetGlob: string, column: string): Promise<boolean> {
@@ -14,27 +14,78 @@ async function hasParquetColumn(parquetGlob: string, column: string): Promise<bo
   }
 }
 
+function removeAppleDoubleParquetFiles(dir: string): number {
+  if (!existsSync(dir)) return 0;
+  let removed = 0;
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        removed += removeAppleDoubleParquetFiles(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (!entry.name.startsWith("._")) continue;
+      if (!entry.name.endsWith(".parquet")) continue;
+      try {
+        unlinkSync(fullPath);
+        removed++;
+      } catch {
+        // Best-effort cleanup; continue.
+      }
+    }
+  } catch {
+    // Ignore listing errors, handled by downstream read errors if any.
+  }
+  return removed;
+}
+
 export async function createMaterializedViews() {
   console.log("Creating materialized views...");
 
   const pmMarketsGlob = `${PM_MARKETS_DIR}/*.parquet`;
   const pmTradesGlob = `${PM_TRADES_DIR}/*.parquet`;
   const pmBlocksGlob = `${PM_BLOCKS_DIR}/*.parquet`;
-  const pmDerivedDir = join(PM_TRADES_DIR, "..", "derived");
-  const pmTradesWithTsParquet = join(pmDerivedDir, "pm_trades_with_ts.parquet");
-  const forceRebuildPmTradesWithTs = process.env.PM_REBUILD_TRADES_WITH_TS === "true";
 
-  mkdirSync(pmDerivedDir, { recursive: true });
+  // Remove macOS AppleDouble sidecar files (._*.parquet) that break DuckDB parquet scans.
+  const cleanedCount =
+    removeAppleDoubleParquetFiles(PM_MARKETS_DIR) +
+    removeAppleDoubleParquetFiles(PM_TRADES_DIR) +
+    removeAppleDoubleParquetFiles(PM_BLOCKS_DIR) +
+    removeAppleDoubleParquetFiles(MARKETS_DIR) +
+    removeAppleDoubleParquetFiles(TRADES_DIR);
+  if (cleanedCount > 0) {
+    console.warn(`Removed ${cleanedCount} AppleDouble sidecar parquet file(s) before view build`);
+  }
 
   const pmHasCategory = await hasParquetColumn(pmMarketsGlob, "category");
   const pmHasTags = await hasParquetColumn(pmMarketsGlob, "tags");
   const pmHasContract = await hasParquetColumn(pmTradesGlob, "_contract");
+  const pmHasTradeTimestamp = await hasParquetColumn(pmTradesGlob, "timestamp");
+  const pmHasBlockTimestamp = await hasParquetColumn(pmBlocksGlob, "timestamp");
 
   const pmCategoryExpr = pmHasCategory
     ? "COALESCE(NULLIF(category, ''), 'uncategorized')"
     : "NULL::VARCHAR";
   const pmTagsExpr = pmHasTags ? "COALESCE(NULLIF(tags, ''), '[]')" : "'[]'";
   const pmContractExpr = pmHasContract ? "t._contract AS _contract" : "NULL::VARCHAR AS _contract";
+  let pmTimestampExpr = "NULL::VARCHAR";
+  let pmTimestampJoin = "";
+  if (pmHasTradeTimestamp && pmHasBlockTimestamp) {
+    pmTimestampExpr = "COALESCE(CAST(t.timestamp AS VARCHAR), b.timestamp)";
+    pmTimestampJoin =
+      `LEFT JOIN read_parquet('${pmBlocksGlob}', union_by_name=true) b ON t.block_number = b.block_number`;
+  } else if (pmHasTradeTimestamp) {
+    pmTimestampExpr = "CAST(t.timestamp AS VARCHAR)";
+  } else if (pmHasBlockTimestamp) {
+    pmTimestampExpr = "b.timestamp";
+    pmTimestampJoin =
+      `INNER JOIN read_parquet('${pmBlocksGlob}', union_by_name=true) b ON t.block_number = b.block_number`;
+  } else {
+    console.warn(
+      "Neither trade timestamps nor block timestamp parquet are available; mv_pm_trades_with_ts.timestamp will be NULL.",
+    );
+  }
 
   await duckdbService.query(`
     CREATE TABLE IF NOT EXISTS mv_daily_volume AS
@@ -155,7 +206,7 @@ export async function createMaterializedViews() {
   const pmTradesWithTsSelect = `
     SELECT
       t.block_number,
-      b.timestamp AS timestamp,
+      ${pmTimestampExpr} AS timestamp,
       t.transaction_hash,
       t.log_index,
       t.order_hash,
@@ -188,41 +239,16 @@ export async function createMaterializedViews() {
         ELSE 'sell'
       END AS taker_side
     FROM read_parquet('${pmTradesGlob}', union_by_name=true) t
-    INNER JOIN read_parquet('${pmBlocksGlob}', union_by_name=true) b
-      ON t.block_number = b.block_number
+    ${pmTimestampJoin}
     WHERE CAST(t.maker_asset_id AS VARCHAR) != CAST(t.taker_asset_id AS VARCHAR)
   `;
 
   // Polymarket: prejoined trades + timestamps + normalized token id.
-  // Persisted as parquet so API restarts don't re-run the heavy trades+blocks join.
   console.log("  mv_pm_trades_with_ts...");
-  try {
-    if (!existsSync(pmTradesWithTsParquet) || forceRebuildPmTradesWithTs) {
-      if (forceRebuildPmTradesWithTs) {
-        console.log("    PM_REBUILD_TRADES_WITH_TS=true -> rebuilding derived parquet");
-        rmSync(pmTradesWithTsParquet, { force: true });
-      } else {
-        console.log("    Building derived parquet (first run)");
-      }
-      await duckdbService.query(
-        `COPY (${pmTradesWithTsSelect}) TO '${pmTradesWithTsParquet}' (FORMAT PARQUET, COMPRESSION ZSTD)`,
-        1_800_000,
-      );
-    }
-    await duckdbService.query(
-      `CREATE VIEW IF NOT EXISTS mv_pm_trades_with_ts AS SELECT * FROM read_parquet('${pmTradesWithTsParquet}', union_by_name=true)`,
-      120_000,
-    );
-  } catch (err) {
-    console.warn(
-      "  mv_pm_trades_with_ts derived parquet build failed; using raw join view:",
-      (err as Error).message,
-    );
-    await duckdbService.query(
-      `CREATE VIEW IF NOT EXISTS mv_pm_trades_with_ts AS ${pmTradesWithTsSelect}`,
-      120_000,
-    );
-  }
+  await duckdbService.query(
+    `CREATE VIEW IF NOT EXISTS mv_pm_trades_with_ts AS ${pmTradesWithTsSelect}`,
+    120_000,
+  );
 
   // Polymarket: enriched trades with market/outcome metadata via token_id equi-join.
   console.log("  mv_pm_trades_enriched...");
@@ -306,6 +332,7 @@ export async function createMaterializedViews() {
            COUNT(*) AS trade_count,
            SUM(usdc_amount) AS volume_usdc
     FROM mv_pm_trades_with_ts
+    WHERE timestamp IS NOT NULL
     GROUP BY 1
     ORDER BY 1
   `, 600_000);

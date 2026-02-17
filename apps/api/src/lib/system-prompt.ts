@@ -110,6 +110,7 @@ Each row = an OrderFilled event from the Polygon blockchain. ~40K+ files.
 | maker_amount      | int    | Amount maker gave (6 decimals, i.e. USDC units) |
 | taker_amount      | int    | Amount taker gave (6 decimals)                  |
 | fee               | int    | Trading fee (6 decimals)                        |
+| timestamp         | string (nullable) | Trade timestamp in ISO format (present for newly indexed data) |
 | _fetched_at       | datetime | When this record was fetched                  |
 | _contract         | string | Contract name (CTF Exchange or NegRisk)         |
 
@@ -119,7 +120,7 @@ Note: Amounts are in USDC with 6 decimals. Divide by 1e6 to get USD.
 
 #### Polymarket Blocks (timestamp lookup)
 Location: '{pm_blocks_dir}/*.parquet'
-Maps Polygon block numbers to timestamps. JOIN with trades to get trade times.
+Maps Polygon block numbers to timestamps. Used mainly for backfill/compatibility when old trades are missing timestamp.
 
 | Column       | Type   | Description                                        |
 |--------------|--------|----------------------------------------------------|

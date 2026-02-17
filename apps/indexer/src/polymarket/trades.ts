@@ -11,6 +11,11 @@ const FETCH_CONCURRENCY = Number(process.env.PM_TRADES_FETCH_CONCURRENCY || "4")
 const CHUNK_SIZE = Number(process.env.PM_TRADES_CHUNK_SIZE || "1000");
 const PROGRESS_LOG_EVERY = Number(process.env.PM_TRADES_PROGRESS_LOG_EVERY || "1");
 const STALL_HEARTBEAT_MS = Number(process.env.PM_TRADES_STALL_HEARTBEAT_MS || "30000");
+const BLOCK_TS_FETCH_CONCURRENCY = Number(process.env.PM_TRADES_BLOCK_TS_FETCH_CONCURRENCY || "20");
+
+function toIsoSecond(tsSeconds: number): string {
+  return new Date(tsSeconds * 1000).toISOString().replace(".000Z", "Z");
+}
 
 export class PolymarketTradesIndexer extends Indexer {
   private chunkSize: number;
@@ -75,6 +80,8 @@ export class PolymarketTradesIndexer extends Indexer {
         start: number;
         end: number;
         chunkRecords: Record<string, unknown>[];
+        uniqueBlockCount: number;
+        timestampFetchMs: number;
       };
       type ChunkCompletion =
         | { ok: true; value: ChunkFetchResult }
@@ -97,15 +104,73 @@ export class PolymarketTradesIndexer extends Indexer {
               client.getOrderFilledTrades(start, end, NEGRISK_CTF_EXCHANGE),
             ]);
 
-            const chunkRecords: Record<string, unknown>[] = [];
-            for (const trade of ctfTrades) {
-              chunkRecords.push({ ...trade, _fetched_at: fetchedAt, _contract: "CTF Exchange" });
-            }
-            for (const trade of negriskTrades) {
-              chunkRecords.push({ ...trade, _fetched_at: fetchedAt, _contract: "NegRisk CTF Exchange" });
+            const allTrades = [...ctfTrades, ...negriskTrades];
+            const uniqueBlocks = [...new Set(allTrades.map((trade) => trade.block_number))];
+            const timestampsByBlock = new Map<number, string>();
+            const tsFetchStartedAt = Date.now();
+
+            if (uniqueBlocks.length > 0) {
+              const blockTsConcurrency = Math.max(1, Math.floor(BLOCK_TS_FETCH_CONCURRENCY));
+              let nextBlockIndex = 0;
+
+              const workers: Promise<void>[] = [];
+              const workerCount = Math.min(blockTsConcurrency, uniqueBlocks.length);
+              for (let i = 0; i < workerCount; i++) {
+                workers.push((async () => {
+                  while (true) {
+                    const idx = nextBlockIndex++;
+                    if (idx >= uniqueBlocks.length) break;
+                    const blockNumber = uniqueBlocks[idx];
+                    const ts = await client.getBlockTimestamp(blockNumber);
+                    timestampsByBlock.set(blockNumber, toIsoSecond(ts));
+                  }
+                })());
+              }
+              await Promise.all(workers);
             }
 
-            return { ok: true, value: { index, start, end, chunkRecords } };
+            const timestampFetchMs = Date.now() - tsFetchStartedAt;
+            const chunkRecords: Record<string, unknown>[] = [];
+            for (const trade of ctfTrades) {
+              const timestamp = timestampsByBlock.get(trade.block_number);
+              if (!timestamp) {
+                throw new Error(
+                  `Missing timestamp for block ${trade.block_number} in chunk ${start}-${end}`,
+                );
+              }
+              chunkRecords.push({
+                ...trade,
+                timestamp,
+                _fetched_at: fetchedAt,
+                _contract: "CTF Exchange",
+              });
+            }
+            for (const trade of negriskTrades) {
+              const timestamp = timestampsByBlock.get(trade.block_number);
+              if (!timestamp) {
+                throw new Error(
+                  `Missing timestamp for block ${trade.block_number} in chunk ${start}-${end}`,
+                );
+              }
+              chunkRecords.push({
+                ...trade,
+                timestamp,
+                _fetched_at: fetchedAt,
+                _contract: "NegRisk CTF Exchange",
+              });
+            }
+
+            return {
+              ok: true,
+              value: {
+                index,
+                start,
+                end,
+                chunkRecords,
+                uniqueBlockCount: uniqueBlocks.length,
+                timestampFetchMs,
+              },
+            };
           } catch (error) {
             return { ok: false, index, error };
           }
@@ -122,7 +187,7 @@ export class PolymarketTradesIndexer extends Indexer {
 
       while (inFlight.size > 0 || ready.has(nextToCommit)) {
         while (ready.has(nextToCommit)) {
-          const { end, chunkRecords } = ready.get(nextToCommit)!;
+          const { end, chunkRecords, uniqueBlockCount, timestampFetchMs } = ready.get(nextToCommit)!;
           ready.delete(nextToCommit);
 
           if (chunkRecords.length > 0) {
@@ -140,7 +205,7 @@ export class PolymarketTradesIndexer extends Indexer {
             chunksProcessed === totalChunks
           ) {
             console.log(
-              `[${chunksProcessed}/${totalChunks}] block: ${end}, chunk: ${chunkRecords.length}, saved: ${totalSaved}`,
+              `[${chunksProcessed}/${totalChunks}] block: ${end}, chunk: ${chunkRecords.length}, blocks: ${uniqueBlockCount}, tsFetchMs: ${timestampFetchMs}, saved: ${totalSaved}`,
             );
           }
 

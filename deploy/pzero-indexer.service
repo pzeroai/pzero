@@ -1,14 +1,14 @@
 [Unit]
-Description=p0 API Server
+Description=pzero Indexer Scheduler
 After=network.target
 
 [Service]
 Type=simple
 User=__APP_USER__
 WorkingDirectory=__APP_DIR__
-ExecStart=__BUN_BIN__ run dev:api
+ExecStart=__BUN_BIN__ run scheduler
 Restart=always
-RestartSec=5
+RestartSec=30
 Environment=NODE_ENV=production
 
 [Install]

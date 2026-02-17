@@ -2,11 +2,8 @@ import cron from "node-cron";
 import { Indexer } from "./common/indexer";
 
 const SCHEDULES: Record<string, string> = {
-  kalshi_markets: "*/5 * * * *", // every 5 min
   polymarket_markets: "*/5 * * * *", // every 5 min
-  kalshi_trades: "*/15 * * * *", // every 15 min
   polymarket_trades: "*/15 * * * *", // every 15 min
-  polymarket_blocks: "*/30 * * * *", // every 30 min
   polymarket_fpmm_trades: "0 * * * *", // every hour
 };
 
