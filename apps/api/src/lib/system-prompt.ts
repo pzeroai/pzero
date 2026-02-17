@@ -84,6 +84,11 @@ Each row = one prediction market.
 | closed          | bool             | Is market closed                               |
 | end_date        | datetime (null)  | When market ends                               |
 | created_at      | datetime (null)  | When market was created                        |
+| category        | string (null)    | Platform category label (if available)         |
+| tags            | string           | JSON array of tags/metadata                    |
+| description     | string (null)    | Market description                             |
+| image           | string (null)    | Market image URL                               |
+| icon            | string (null)    | Market icon URL                                |
 | _fetched_at     | datetime         | When this record was fetched                   |
 
 **Polymarket prices are DECIMALS (0 to 1).** A price of 0.65 = $0.65 = 65% implied probability.
@@ -140,7 +145,7 @@ Trades from the legacy Fixed Product Market Maker contracts.
 | timestamp       | int (nullable)| Unix timestamp (if enriched)                   |
 | _fetched_at     | datetime      | When this record was fetched                   |
 
-### MATERIALIZED VIEWS (in-memory, prefer these for common queries)
+### MATERIALIZED VIEWS (prefer these for common queries)
 
 **Kalshi views:**
 - **mv_daily_volume** — Daily aggregated Kalshi trade volume
@@ -153,6 +158,12 @@ Trades from the legacy Fixed Product Market Maker contracts.
   | price (int) | trade_count (int) | contract_count (int) | taker_won_contracts (int) | taker_won_trades (int) |
 
 **Polymarket views:**
+- **mv_pm_market_tokens** — Token-normalized mapping (1 row per market outcome token), use this for token-to-market joins
+  | market_id (string) | condition_id (string) | question (string) | slug (string) | category (string/null) | tags (string JSON) | outcome_index (int) | outcome_name (string) | token_id (string) | active (bool) | closed (bool) |
+- **mv_pm_trades_with_ts** — Polymarket trades pre-joined with block timestamps + normalized token_id and side
+  | block_number (int) | timestamp (string) | transaction_hash (string) | log_index (int) | maker (string) | taker (string) | token_id (string) | usdc_amount (bigint) | token_amount (bigint) | taker_side (string: buy/sell) |
+- **mv_pm_trades_enriched** — Trades joined to market/outcome metadata via token_id (best default for market-level PM queries)
+  | timestamp (string) | token_id (string) | usdc_amount (bigint) | token_amount (bigint) | taker_side (string) | market_id (string) | question (string) | slug (string) | category (string/null) | tags (string JSON) | outcome_name (string) |
 - **mv_pm_daily_volume** — Daily aggregated Polymarket trade volume (USDC with 6 decimals, divide by 1e6 for USD)
   | day (date) | trade_count (int) | volume_usdc (bigint) |
 - **mv_pm_market_summary** — Polymarket market counts by status
@@ -195,44 +206,24 @@ INNER JOIN resolved_markets m ON t.ticker = m.ticker
 
 ### Polymarket: Trades with timestamps
 \`\`\`sql
-SELECT DATE_TRUNC('day', b.timestamp::TIMESTAMP) AS day,
+SELECT DATE_TRUNC('day', t.timestamp::TIMESTAMP) AS day,
        COUNT(*) AS trades,
-       SUM(t.maker_amount) / 1e6 AS volume_usd
-FROM '{pm_trades_dir}/*.parquet' t
-INNER JOIN '{pm_blocks_dir}/*.parquet' b ON t.block_number = b.block_number
+       SUM(t.usdc_amount) / 1e6 AS volume_usd
+FROM mv_pm_trades_with_ts t
 GROUP BY 1 ORDER BY 1
 \`\`\`
 
-### Polymarket: Join trades with market outcomes (for calibration/win-rate)
-To map Polymarket trades to outcomes, join on clob_token_ids:
+### Polymarket: Join trades with market metadata (recommended)
 \`\`\`sql
-WITH pm_resolved AS (
-    SELECT id, question,
-           json_extract_string(clob_token_ids, '$[0]') AS yes_token,
-           json_extract_string(clob_token_ids, '$[1]') AS no_token,
-           CASE WHEN CAST(json_extract_string(outcome_prices, '$[0]') AS DOUBLE) > 0.99 THEN 'Yes' ELSE 'No' END AS winning_outcome
-    FROM '{pm_markets_dir}/*.parquet'
-    WHERE closed = true
-    AND (CAST(json_extract_string(outcome_prices, '$[0]') AS DOUBLE) > 0.99
-      OR CAST(json_extract_string(outcome_prices, '$[1]') AS DOUBLE) > 0.99)
-),
-pm_trades_with_outcome AS (
-    SELECT t.*,
-           CASE WHEN t.taker_asset_id = m.yes_token THEN 'Yes'
-                WHEN t.taker_asset_id = m.no_token THEN 'No'
-                WHEN t.maker_asset_id = m.yes_token THEN 'Yes'
-                WHEN t.maker_asset_id = m.no_token THEN 'No'
-           END AS trade_outcome,
-           m.winning_outcome,
-           -- Price: when taker buys outcome tokens (asset_id != 0), price = maker_amount / taker_amount
-           CASE WHEN t.maker_asset_id = '0' THEN t.maker_amount * 1.0 / t.taker_amount
-                ELSE t.taker_amount * 1.0 / t.maker_amount END AS price
-    FROM '{pm_trades_dir}/*.parquet' t
-    INNER JOIN pm_resolved m ON (t.taker_asset_id = m.yes_token OR t.taker_asset_id = m.no_token
-                                 OR t.maker_asset_id = m.yes_token OR t.maker_asset_id = m.no_token)
-    WHERE t.maker_asset_id != t.taker_asset_id
-)
-SELECT ... FROM pm_trades_with_outcome
+SELECT
+  DATE_TRUNC('day', timestamp::TIMESTAMP) AS day,
+  category,
+  question,
+  outcome_name,
+  SUM(usdc_amount) / 1e6 AS volume_usd
+FROM mv_pm_trades_enriched
+GROUP BY 1, 2, 3, 4
+ORDER BY 1
 \`\`\`
 
 ### Cross-platform: Compare daily volumes
@@ -248,7 +239,7 @@ ORDER BY day
 ## INSTRUCTIONS
 1. Generate a single DuckDB-compatible SELECT query that answers the user's question.
 2. Use '{markets_dir}' and '{trades_dir}' as path placeholders — they will be resolved.
-3. For materialized views (mv_daily_volume, mv_price_distribution, mv_category_summary), query them directly by table name.
+3. For materialized views, query them directly by table name. Prefer 'mv_pm_trades_enriched', 'mv_pm_trades_with_ts', and 'mv_pm_market_tokens' over raw Polymarket parquet joins.
 4. Choose the best chart type for the data.
 5. For large datasets, always aggregate — never return more than ~1000 rows.
 6. Use LIMIT if returning raw rows.
