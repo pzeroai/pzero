@@ -41,6 +41,7 @@ function removeAppleDoubleParquetFiles(dir: string): number {
 }
 
 export async function createMaterializedViews() {
+  const startedAt = Date.now();
   console.log("Creating materialized views...");
 
   const pmMarketsGlob = `${PM_MARKETS_DIR}/*.parquet`;
@@ -63,6 +64,7 @@ export async function createMaterializedViews() {
   const pmHasContract = await hasParquetColumn(pmTradesGlob, "_contract");
   const pmHasTradeTimestamp = await hasParquetColumn(pmTradesGlob, "timestamp");
   const pmHasBlockTimestamp = await hasParquetColumn(pmBlocksGlob, "timestamp");
+  const pmUseBlockTimestampFallback = process.env.PM_MV_USE_BLOCK_TIMESTAMP_FALLBACK === "true";
 
   const pmCategoryExpr = pmHasCategory
     ? "COALESCE(NULLIF(category, ''), 'uncategorized')"
@@ -71,11 +73,13 @@ export async function createMaterializedViews() {
   const pmContractExpr = pmHasContract ? "t._contract AS _contract" : "NULL::VARCHAR AS _contract";
   let pmTimestampExpr = "NULL::VARCHAR";
   let pmTimestampJoin = "";
-  if (pmHasTradeTimestamp && pmHasBlockTimestamp) {
+  if (pmHasTradeTimestamp && pmHasBlockTimestamp && pmUseBlockTimestampFallback) {
+    // Optional fallback for older rows where trade timestamp may still be null.
     pmTimestampExpr = "COALESCE(CAST(t.timestamp AS VARCHAR), b.timestamp)";
     pmTimestampJoin =
       `LEFT JOIN read_parquet('${pmBlocksGlob}', union_by_name=true) b ON t.block_number = b.block_number`;
   } else if (pmHasTradeTimestamp) {
+    // Fast path: use trade-level timestamp directly and avoid full blocks join.
     pmTimestampExpr = "CAST(t.timestamp AS VARCHAR)";
   } else if (pmHasBlockTimestamp) {
     pmTimestampExpr = "b.timestamp";
@@ -83,9 +87,84 @@ export async function createMaterializedViews() {
       `INNER JOIN read_parquet('${pmBlocksGlob}', union_by_name=true) b ON t.block_number = b.block_number`;
   } else {
     console.warn(
-      "Neither trade timestamps nor block timestamp parquet are available; mv_pm_trades_with_ts.timestamp will be NULL.",
+      "Neither trade timestamps nor block timestamp parquet are available; PM derived views will have NULL timestamps.",
     );
   }
+
+  const pmTradesBaseSelect = `
+    SELECT
+      t.block_number,
+      ${pmTimestampExpr} AS timestamp,
+      t.transaction_hash,
+      t.log_index,
+      t.order_hash,
+      t.maker,
+      t.taker,
+      CAST(t.maker_asset_id AS VARCHAR) AS maker_asset_id,
+      CAST(t.taker_asset_id AS VARCHAR) AS taker_asset_id,
+      t.maker_amount,
+      t.taker_amount,
+      t.fee,
+      ${pmContractExpr},
+      CASE
+        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
+        THEN CAST(t.taker_asset_id AS VARCHAR)
+        ELSE CAST(t.maker_asset_id AS VARCHAR)
+      END AS token_id,
+      CASE
+        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
+        THEN t.maker_amount
+        ELSE t.taker_amount
+      END AS usdc_amount,
+      CASE
+        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
+        THEN t.taker_amount
+        ELSE t.maker_amount
+      END AS token_amount,
+      CASE
+        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
+        THEN 'buy'
+        ELSE 'sell'
+      END AS taker_side
+    FROM read_parquet('${pmTradesGlob}', union_by_name=true) t
+    ${pmTimestampJoin}
+    WHERE CAST(t.maker_asset_id AS VARCHAR) != CAST(t.taker_asset_id AS VARCHAR)
+  `;
+
+  const pmDailyVolumeSelect = pmHasTradeTimestamp
+    ? `
+    WITH src AS (
+      SELECT
+        TRY_CAST(timestamp AS TIMESTAMP) AS ts,
+        CAST(maker_asset_id AS VARCHAR) AS maker_asset_id,
+        CAST(taker_asset_id AS VARCHAR) AS taker_asset_id,
+        maker_amount,
+        taker_amount
+      FROM read_parquet('${pmTradesGlob}', union_by_name=true)
+    )
+    SELECT DATE_TRUNC('day', ts) AS day,
+           COUNT(*) AS trade_count,
+           SUM(
+             CASE
+               WHEN maker_asset_id = '0' THEN maker_amount
+               ELSE taker_amount
+             END
+           ) AS volume_usdc
+    FROM src
+    WHERE ts IS NOT NULL
+      AND maker_asset_id != taker_asset_id
+    GROUP BY 1
+    ORDER BY 1
+  `
+    : `
+    SELECT DATE_TRUNC('day', t.timestamp::TIMESTAMP) AS day,
+           COUNT(*) AS trade_count,
+           SUM(t.usdc_amount) AS volume_usdc
+    FROM (${pmTradesBaseSelect}) t
+    WHERE t.timestamp IS NOT NULL
+    GROUP BY 1
+    ORDER BY 1
+  `;
 
   await duckdbService.query(`
     CREATE TABLE IF NOT EXISTS mv_daily_volume AS
@@ -203,53 +282,6 @@ export async function createMaterializedViews() {
     WHERE token_id IS NOT NULL AND token_id != ''
   `, 600_000);
 
-  const pmTradesWithTsSelect = `
-    SELECT
-      t.block_number,
-      ${pmTimestampExpr} AS timestamp,
-      t.transaction_hash,
-      t.log_index,
-      t.order_hash,
-      t.maker,
-      t.taker,
-      CAST(t.maker_asset_id AS VARCHAR) AS maker_asset_id,
-      CAST(t.taker_asset_id AS VARCHAR) AS taker_asset_id,
-      t.maker_amount,
-      t.taker_amount,
-      t.fee,
-      ${pmContractExpr},
-      CASE
-        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
-        THEN CAST(t.taker_asset_id AS VARCHAR)
-        ELSE CAST(t.maker_asset_id AS VARCHAR)
-      END AS token_id,
-      CASE
-        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
-        THEN t.maker_amount
-        ELSE t.taker_amount
-      END AS usdc_amount,
-      CASE
-        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
-        THEN t.taker_amount
-        ELSE t.maker_amount
-      END AS token_amount,
-      CASE
-        WHEN CAST(t.maker_asset_id AS VARCHAR) = '0'
-        THEN 'buy'
-        ELSE 'sell'
-      END AS taker_side
-    FROM read_parquet('${pmTradesGlob}', union_by_name=true) t
-    ${pmTimestampJoin}
-    WHERE CAST(t.maker_asset_id AS VARCHAR) != CAST(t.taker_asset_id AS VARCHAR)
-  `;
-
-  // Polymarket: prejoined trades + timestamps + normalized token id.
-  console.log("  mv_pm_trades_with_ts...");
-  await duckdbService.query(
-    `CREATE VIEW IF NOT EXISTS mv_pm_trades_with_ts AS ${pmTradesWithTsSelect}`,
-    120_000,
-  );
-
   // Polymarket: enriched trades with market/outcome metadata via token_id equi-join.
   console.log("  mv_pm_trades_enriched...");
   await duckdbService.query(`
@@ -270,7 +302,7 @@ export async function createMaterializedViews() {
       m.created_at AS market_created_at,
       m.volume AS market_volume,
       m.liquidity AS market_liquidity
-    FROM mv_pm_trades_with_ts t
+    FROM (${pmTradesBaseSelect}) t
     INNER JOIN mv_pm_market_tokens m ON t.token_id = m.token_id
   `, 120_000);
 
@@ -310,7 +342,7 @@ export async function createMaterializedViews() {
       SELECT
         ROUND(t.usdc_amount * 100.0 / NULLIF(t.token_amount, 0)) AS price,
         lk.won
-      FROM mv_pm_trades_with_ts t
+      FROM (${pmTradesBaseSelect}) t
       INNER JOIN mv_pm_token_lookup lk ON t.token_id = lk.token_id
       WHERE t.token_amount > 0
     )
@@ -328,13 +360,7 @@ export async function createMaterializedViews() {
   console.log("  mv_pm_daily_volume...");
   await duckdbService.query(`
     CREATE TABLE IF NOT EXISTS mv_pm_daily_volume AS
-    SELECT DATE_TRUNC('day', timestamp::TIMESTAMP) AS day,
-           COUNT(*) AS trade_count,
-           SUM(usdc_amount) AS volume_usdc
-    FROM mv_pm_trades_with_ts
-    WHERE timestamp IS NOT NULL
-    GROUP BY 1
-    ORDER BY 1
+    ${pmDailyVolumeSelect}
   `, 600_000);
 
   // Polymarket: trader-level summary (volume + P&L on resolved markets)
@@ -361,7 +387,7 @@ export async function createMaterializedViews() {
           ELSE -CAST(t.token_amount AS BIGINT)
         END AS token_flow,
         t.token_id
-      FROM mv_pm_trades_with_ts t
+      FROM (${pmTradesBaseSelect}) t
       UNION ALL
       SELECT
         t.maker AS address,
@@ -375,7 +401,7 @@ export async function createMaterializedViews() {
           ELSE CAST(t.token_amount AS BIGINT)
         END AS token_flow,
         t.token_id
-      FROM mv_pm_trades_with_ts t
+      FROM (${pmTradesBaseSelect}) t
     )
     SELECT
       tf.address,
@@ -408,5 +434,5 @@ export async function createMaterializedViews() {
     GROUP BY 1
   `, 120_000);
 
-  console.log("Materialized views created.");
+  console.log(`Materialized views created in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`);
 }

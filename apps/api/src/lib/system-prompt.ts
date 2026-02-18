@@ -161,8 +161,6 @@ Trades from the legacy Fixed Product Market Maker contracts.
 **Polymarket views:**
 - **mv_pm_market_tokens** — Token-normalized mapping (1 row per market outcome token), use this for token-to-market joins
   | market_id (string) | condition_id (string) | question (string) | slug (string) | category (string/null) | tags (string JSON) | outcome_index (int) | outcome_name (string) | token_id (string) | active (bool) | closed (bool) |
-- **mv_pm_trades_with_ts** — Polymarket trades pre-joined with block timestamps + normalized token_id and side
-  | block_number (int) | timestamp (string) | transaction_hash (string) | log_index (int) | maker (string) | taker (string) | token_id (string) | usdc_amount (bigint) | token_amount (bigint) | taker_side (string: buy/sell) |
 - **mv_pm_trades_enriched** — Trades joined to market/outcome metadata via token_id (best default for market-level PM queries)
   | timestamp (string) | token_id (string) | usdc_amount (bigint) | token_amount (bigint) | taker_side (string) | market_id (string) | question (string) | slug (string) | category (string/null) | tags (string JSON) | outcome_name (string) |
 - **mv_pm_daily_volume** — Daily aggregated Polymarket trade volume (USDC with 6 decimals, divide by 1e6 for USD)
@@ -207,10 +205,10 @@ INNER JOIN resolved_markets m ON t.ticker = m.ticker
 
 ### Polymarket: Trades with timestamps
 \`\`\`sql
-SELECT DATE_TRUNC('day', t.timestamp::TIMESTAMP) AS day,
+SELECT DATE_TRUNC('day', timestamp::TIMESTAMP) AS day,
        COUNT(*) AS trades,
-       SUM(t.usdc_amount) / 1e6 AS volume_usd
-FROM mv_pm_trades_with_ts t
+       SUM(usdc_amount) / 1e6 AS volume_usd
+FROM mv_pm_trades_enriched
 GROUP BY 1 ORDER BY 1
 \`\`\`
 
@@ -240,7 +238,7 @@ ORDER BY day
 ## INSTRUCTIONS
 1. Generate a single DuckDB-compatible SELECT query that answers the user's question.
 2. Use '{markets_dir}' and '{trades_dir}' as path placeholders — they will be resolved.
-3. For materialized views, query them directly by table name. Prefer 'mv_pm_trades_enriched', 'mv_pm_trades_with_ts', and 'mv_pm_market_tokens' over raw Polymarket parquet joins.
+3. For materialized views, query them directly by table name. Prefer 'mv_pm_trades_enriched' and 'mv_pm_market_tokens' over raw Polymarket parquet joins.
 4. Choose the best chart type for the data.
 5. For large datasets, always aggregate — never return more than ~1000 rows.
 6. Use LIMIT if returning raw rows.
