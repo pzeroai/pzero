@@ -10,6 +10,13 @@ import {
   setCachedLLM,
 } from "../services/cache";
 
+const QUERY_MAX_ROWS = Math.max(1, Math.floor(Number(process.env.QUERY_MAX_ROWS || "2000")));
+
+function buildSafeExecutionSQL(sql: string): string {
+  const trimmed = sql.trim().replace(/;+\s*$/, "");
+  return `SELECT * FROM (${trimmed}) AS p0_query LIMIT ${QUERY_MAX_ROWS}`;
+}
+
 export const queryRoutes: FastifyPluginAsync = async (app) => {
   app.post<{ Body: QueryRequest }>("/query", async (request, reply) => {
     const { message, history } = request.body;
@@ -51,11 +58,12 @@ export const queryRoutes: FastifyPluginAsync = async (app) => {
 
     // 3. Resolve paths and execute (with query cache)
     const resolvedSQL = duckdbService.resolvePaths(llmResult.sql);
-    let data = getCachedQuery(resolvedSQL);
+    const safeSQL = buildSafeExecutionSQL(resolvedSQL);
+    let data = getCachedQuery(safeSQL);
 
     if (!data) {
       try {
-        data = await duckdbService.query(resolvedSQL);
+        data = await duckdbService.query(safeSQL);
       } catch (err) {
         // Self-correction: send error back to LLM for one retry
         const sqlError = err instanceof Error ? err.message : String(err);
@@ -80,14 +88,14 @@ export const queryRoutes: FastifyPluginAsync = async (app) => {
           }
 
           const retrySQL = duckdbService.resolvePaths(llmResult.sql);
-          data = await duckdbService.query(retrySQL);
+          data = await duckdbService.query(buildSafeExecutionSQL(retrySQL));
         } catch {
           return reply.status(400).send({
             error: `Query failed: ${sqlError}`,
           });
         }
       }
-      setCachedQuery(resolvedSQL, data);
+      setCachedQuery(safeSQL, data);
     }
 
     const response: QueryResponse = {

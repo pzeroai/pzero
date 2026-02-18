@@ -1,7 +1,12 @@
 import duckdb from "duckdb";
 import path from "path";
+import { mkdirSync } from "fs";
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(import.meta.dir, "../../../../data"));
+const DUCKDB_PATH = process.env.DUCKDB_PATH || ":memory:";
+const DUCKDB_MEMORY_LIMIT = process.env.DUCKDB_MEMORY_LIMIT || "1GB";
+const DUCKDB_TEMP_DIR = process.env.DUCKDB_TEMP_DIR || path.join(DATA_DIR, ".duckdb_tmp");
+const DUCKDB_THREADS = Number(process.env.DUCKDB_THREADS || "0");
 
 const KALSHI_DIR = path.join(DATA_DIR, "kalshi");
 const MARKETS_DIR = path.join(KALSHI_DIR, "markets");
@@ -32,16 +37,52 @@ function convertSpecialTypes(obj: unknown): unknown {
 class DuckDBService {
   private db: duckdb.Database;
   private conn: duckdb.Connection;
+  private initPromise: Promise<void>;
 
   constructor() {
-    this.db = new duckdb.Database(":memory:");
+    this.db = new duckdb.Database(DUCKDB_PATH);
     this.conn = this.db.connect();
+    this.initPromise = this.initialize();
   }
 
-  query<T = Record<string, unknown>>(
+  private run(sql: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this.conn as any).run(sql, (err: Error | null) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  private async initialize(): Promise<void> {
+    try {
+      mkdirSync(DUCKDB_TEMP_DIR, { recursive: true });
+      await this.run(`SET temp_directory='${DUCKDB_TEMP_DIR.replace(/'/g, "''")}'`);
+    } catch (err) {
+      console.warn("DuckDB temp_directory setup skipped:", (err as Error).message);
+    }
+
+    try {
+      await this.run(`SET memory_limit='${DUCKDB_MEMORY_LIMIT.replace(/'/g, "''")}'`);
+    } catch (err) {
+      console.warn("DuckDB memory_limit setup skipped:", (err as Error).message);
+    }
+
+    if (Number.isFinite(DUCKDB_THREADS) && DUCKDB_THREADS > 0) {
+      try {
+        await this.run(`SET threads=${Math.floor(DUCKDB_THREADS)}`);
+      } catch (err) {
+        console.warn("DuckDB threads setup skipped:", (err as Error).message);
+      }
+    }
+  }
+
+  async query<T = Record<string, unknown>>(
     sql: string,
     timeout = 120_000,
   ): Promise<T[]> {
+    await this.initPromise;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error("Query timed out after 2 minutes"));

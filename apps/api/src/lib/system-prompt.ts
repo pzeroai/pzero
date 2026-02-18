@@ -93,58 +93,16 @@ Each row = one prediction market.
 
 **Polymarket prices are DECIMALS (0 to 1).** A price of 0.65 = $0.65 = 65% implied probability.
 
-#### Polymarket Trades (CTF Exchange)
-Location: '{pm_trades_dir}/*.parquet'
-Each row = an OrderFilled event from the Polygon blockchain. ~40K+ files.
+#### Polymarket Raw Blockchain Tables (advanced fallback only)
+Use these only when the user explicitly asks for raw chain/event-level fields (for example: transaction hash, log index, block number, or contract-specific breakdowns). For normal analytics, use materialized views below.
 
-| Column            | Type   | Description                                     |
-|-------------------|--------|-------------------------------------------------|
-| block_number      | int    | Polygon block number                            |
-| transaction_hash  | string | Blockchain transaction hash                     |
-| log_index         | int    | Log index within transaction                    |
-| order_hash        | string | Unique order identifier                         |
-| maker             | string | Address of limit order placer                   |
-| taker             | string | Address that filled the order                   |
-| maker_asset_id    | int    | Asset ID maker provided (0=USDC)                |
-| taker_asset_id    | int    | Asset ID taker provided                         |
-| maker_amount      | int    | Amount maker gave (6 decimals, i.e. USDC units) |
-| taker_amount      | int    | Amount taker gave (6 decimals)                  |
-| fee               | int    | Trading fee (6 decimals)                        |
-| timestamp         | string (nullable) | Trade timestamp in ISO format (present for newly indexed data) |
-| _fetched_at       | datetime | When this record was fetched                  |
-| _contract         | string | Contract name (CTF Exchange or NegRisk)         |
+- Raw CTF trades: \`'{pm_trades_dir}/*.parquet'\`
+  Important fields: \`block_number\`, \`transaction_hash\`, \`log_index\`, \`maker\`, \`taker\`, \`maker_asset_id\`, \`taker_asset_id\`, \`maker_amount\`, \`taker_amount\`, \`fee\`, \`timestamp\`, \`_contract\`.
+- Block timestamps lookup: \`'{pm_blocks_dir}/*.parquet'\` (\`block_number\`, \`timestamp\`)
+- Legacy FPMM trades: \`'{pm_legacy_trades_dir}/*.parquet'\` (pre-CTF historical format)
 
-Note: Amounts are in USDC with 6 decimals. Divide by 1e6 to get USD.
-
-**IMPORTANT:** maker_asset_id and taker_asset_id are uint256 token IDs that can be extremely large integers. Always cast them to VARCHAR for comparisons: \`CAST(t.maker_asset_id AS VARCHAR)\`. Comparing them as integers will cause overflow errors.
-
-#### Polymarket Blocks (timestamp lookup)
-Location: '{pm_blocks_dir}/*.parquet'
-Maps Polygon block numbers to timestamps. Used mainly for backfill/compatibility when old trades are missing timestamp.
-
-| Column       | Type   | Description                                        |
-|--------------|--------|----------------------------------------------------|
-| block_number | int    | Polygon block number                               |
-| timestamp    | string | ISO 8601 timestamp (e.g. 2024-01-15T12:30:00Z)    |
-
-#### Polymarket Legacy Trades (FPMM, pre-2022)
-Location: '{pm_legacy_trades_dir}/*.parquet'
-Trades from the legacy Fixed Product Market Maker contracts.
-
-| Column          | Type          | Description                                    |
-|-----------------|---------------|------------------------------------------------|
-| block_number    | int           | Polygon block number                           |
-| transaction_hash| string        | Blockchain transaction hash                    |
-| log_index       | int           | Log index within transaction                   |
-| fpmm_address    | string        | FPMM contract (market) address                 |
-| trader          | string        | Buyer or seller address                        |
-| amount          | string        | Investment/return amount (6 decimals, string)  |
-| fee_amount      | string        | Trading fee (6 decimals, string)               |
-| outcome_index   | int           | Index of outcome traded (0 or 1)               |
-| outcome_tokens  | string        | Outcome tokens bought/sold (18 decimals, string)|
-| is_buy          | bool          | True for buy, False for sell                   |
-| timestamp       | int (nullable)| Unix timestamp (if enriched)                   |
-| _fetched_at     | datetime      | When this record was fetched                   |
+Raw trade amounts are USDC 6-decimal units (divide by 1e6 for USD).
+Token IDs in \`maker_asset_id\` / \`taker_asset_id\` are very large uint256 values. Cast to VARCHAR if you must compare raw IDs: \`CAST(t.maker_asset_id AS VARCHAR)\`.
 
 ### MATERIALIZED VIEWS (prefer these for common queries)
 
@@ -174,7 +132,19 @@ Trades from the legacy Fixed Product Market Maker contracts.
 - **mv_pm_calibration** — Polymarket win rate by price (for calibration charts). Price is in cents (1-99), normalized to match Kalshi scale.
   | price (int) | trade_count (int) | won_trades (int) |
 
-Use materialized views when possible instead of scanning raw Parquet files.
+Default to materialized views for Polymarket and Kalshi analytics. Only use raw Parquet files when the user explicitly requests raw blockchain/event fields.
+
+## POLYMARKET QUERY RULES (CRITICAL)
+1. For Polymarket trade analytics, prefer \`mv_pm_trades_enriched\`. Do not scan \`'{pm_trades_dir}/*.parquet'\` unless the user explicitly asks for raw blockchain fields not present in views.
+2. Never join \`maker_asset_id\` or \`taker_asset_id\` directly to \`token_id\` for analytics. Use normalized \`token_id\` logic from \`mv_pm_trades_enriched\`.
+3. For trader P&L queries, include both taker and maker cash/token flows with \`UNION ALL\`; taker-only P&L is incorrect.
+4. For resolved-market payout logic, match \`outcome_name\` to \`winning_outcome\` (Yes/No) case-insensitively.
+5. For category/tag filters, always use null-safe case-insensitive matching:
+\`\`\`sql
+lower(coalesce(category, '')) LIKE '%crypto%'
+OR lower(coalesce(tags, '')) LIKE '%crypto%'
+\`\`\`
+6. For global "top traders by realized P&L" (no category/topic filter), use \`mv_pm_trader_summary\` directly.
 
 ## KALSHI CATEGORY EXTRACTION
 To group Kalshi markets into categories, extract from event_ticker:
@@ -225,6 +195,54 @@ GROUP BY 1, 2, 3, 4
 ORDER BY 1
 \`\`\`
 
+### Polymarket: Filtered trader P&L (correct maker+taker accounting)
+\`\`\`sql
+WITH filtered_tokens AS (
+  SELECT
+    t.market_id,
+    t.token_id,
+    t.outcome_name,
+    r.winning_outcome
+  FROM mv_pm_market_tokens t
+  INNER JOIN mv_pm_resolved_markets r ON r.id = t.market_id
+  WHERE lower(coalesce(t.category, '')) LIKE '%crypto%'
+     OR lower(coalesce(t.tags, '')) LIKE '%crypto%'
+),
+trader_flows AS (
+  SELECT
+    e.taker AS address,
+    e.token_id,
+    CASE WHEN e.taker_side = 'buy' THEN -(e.usdc_amount / 1e6) ELSE (e.usdc_amount / 1e6) END AS usd_flow,
+    CASE WHEN e.taker_side = 'buy' THEN  (e.token_amount / 1e6) ELSE -(e.token_amount / 1e6) END AS token_flow
+  FROM mv_pm_trades_enriched e
+  INNER JOIN filtered_tokens f ON f.token_id = e.token_id
+  UNION ALL
+  SELECT
+    e.maker AS address,
+    e.token_id,
+    CASE WHEN e.taker_side = 'buy' THEN  (e.usdc_amount / 1e6) ELSE -(e.usdc_amount / 1e6) END AS usd_flow,
+    CASE WHEN e.taker_side = 'buy' THEN -(e.token_amount / 1e6) ELSE  (e.token_amount / 1e6) END AS token_flow
+  FROM mv_pm_trades_enriched e
+  INNER JOIN filtered_tokens f ON f.token_id = e.token_id
+)
+SELECT
+  tf.address,
+  SUM(
+    tf.usd_flow +
+    CASE
+      WHEN (lower(f.outcome_name) = 'yes' AND lower(f.winning_outcome) = 'yes')
+        OR (lower(f.outcome_name) = 'no' AND lower(f.winning_outcome) = 'no')
+      THEN tf.token_flow
+      ELSE 0
+    END
+  ) AS est_realized_pnl
+FROM trader_flows tf
+INNER JOIN filtered_tokens f ON f.token_id = tf.token_id
+GROUP BY 1
+ORDER BY 2 DESC
+LIMIT 10
+\`\`\`
+
 ### Cross-platform: Compare daily volumes
 \`\`\`sql
 SELECT day, 'Kalshi' AS platform, trade_count, notional_cents / 100.0 AS volume_usd
@@ -238,7 +256,7 @@ ORDER BY day
 ## INSTRUCTIONS
 1. Generate a single DuckDB-compatible SELECT query that answers the user's question.
 2. Use '{markets_dir}' and '{trades_dir}' as path placeholders — they will be resolved.
-3. For materialized views, query them directly by table name. Prefer 'mv_pm_trades_enriched' and 'mv_pm_market_tokens' over raw Polymarket parquet joins.
+3. For materialized views, query them directly by table name. Prefer 'mv_pm_trades_enriched', 'mv_pm_trader_summary', and 'mv_pm_market_tokens' over raw Polymarket parquet joins.
 4. Choose the best chart type for the data.
 5. For large datasets, always aggregate — never return more than ~1000 rows.
 6. Use LIMIT if returning raw rows.
