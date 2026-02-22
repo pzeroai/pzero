@@ -6,26 +6,6 @@ const CLICKHOUSE_USER = process.env.CLICKHOUSE_USER || "default";
 const CLICKHOUSE_PASSWORD = process.env.CLICKHOUSE_PASSWORD || "";
 const CLICKHOUSE_DATABASE = process.env.CLICKHOUSE_DATABASE || "default";
 const RPC_FALLBACK_CONCURRENCY = Number(process.env.PM_TRADES_TS_BACKFILL_RPC_CONCURRENCY || "20");
-const QUERY_TIMEOUT_MS = parseNonNegativeInteger(
-  process.env.PM_TRADES_TS_BACKFILL_QUERY_TIMEOUT_MS,
-  300_000,
-);
-const LONG_QUERY_TIMEOUT_MS = parseNonNegativeInteger(
-  process.env.PM_TRADES_TS_BACKFILL_LONG_QUERY_TIMEOUT_MS,
-  1_800_000,
-);
-const DDL_TIMEOUT_MS = parseNonNegativeInteger(
-  process.env.PM_TRADES_TS_BACKFILL_DDL_TIMEOUT_MS,
-  1_800_000,
-);
-const MUTATION_TIMEOUT_MS = parseNonNegativeInteger(
-  process.env.PM_TRADES_TS_BACKFILL_MUTATION_TIMEOUT_MS,
-  3_600_000,
-);
-const INSERT_TIMEOUT_MS = parseNonNegativeInteger(
-  process.env.PM_TRADES_TS_BACKFILL_INSERT_TIMEOUT_MS,
-  900_000,
-);
 const BLOCKS_JOIN_TABLE = "pm_blocks_join_backfill";
 const MISSING_TIMESTAMP_WHERE = "timestamp IS NULL OR timestamp = ''";
 
@@ -40,24 +20,6 @@ interface MissingBlockRow {
 
 interface CountRow {
   c: number | string;
-}
-
-function parseNonNegativeInteger(
-  value: string | undefined,
-  fallback: number,
-): number {
-  if (value == null || value.trim() === "") return fallback;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(0, Math.floor(parsed));
-}
-
-function getAbortSignal(timeoutMs: number): AbortSignal | undefined {
-  return timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
-}
-
-function formatTimeout(timeoutMs: number): string {
-  return timeoutMs > 0 ? `${timeoutMs}` : "none";
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -80,32 +42,23 @@ function toNumber(value: number | string): number {
 async function fetchRows<T = Record<string, unknown>>(
   client: ClickHouseClient,
   query: string,
-  timeoutMs = QUERY_TIMEOUT_MS,
 ): Promise<T[]> {
-  const abortSignal = getAbortSignal(timeoutMs);
   const result = await client.query({
     query,
     format: "JSONEachRow",
-    ...(abortSignal ? { abort_signal: abortSignal } : {}),
   });
   return await result.json<T>();
 }
 
 async function fetchCount(client: ClickHouseClient, query: string): Promise<number> {
-  const rows = await fetchRows<CountRow>(client, query, QUERY_TIMEOUT_MS);
+  const rows = await fetchRows<CountRow>(client, query);
   if (rows.length === 0) return 0;
   return toNumber(rows[0].c);
 }
 
-async function command(
-  client: ClickHouseClient,
-  query: string,
-  timeoutMs = DDL_TIMEOUT_MS,
-): Promise<void> {
-  const abortSignal = getAbortSignal(timeoutMs);
+async function command(client: ClickHouseClient, query: string): Promise<void> {
   await client.command({
     query,
-    ...(abortSignal ? { abort_signal: abortSignal } : {}),
   });
 }
 
@@ -134,7 +87,6 @@ async function refreshBlocksJoinTable(client: ClickHouseClient): Promise<void> {
       FROM polymarket_blocks
       GROUP BY block_number
     `,
-    DDL_TIMEOUT_MS,
   );
 }
 
@@ -151,7 +103,6 @@ async function applyTradeTimestampUpdate(
         AND joinGet('${joinTableRef}', 'timestamp', block_number) != ''
       SETTINGS mutations_sync = 2
     `,
-    MUTATION_TIMEOUT_MS,
   );
 }
 
@@ -169,7 +120,6 @@ async function fetchMissingBlocks(client: ClickHouseClient): Promise<number[]> {
         )
       ORDER BY block_number
     `,
-    LONG_QUERY_TIMEOUT_MS,
   );
 
   return rows
@@ -228,9 +178,6 @@ async function main() {
   try {
     console.log(
       `Backfilling polymarket_trades.timestamp (db=${CLICKHOUSE_DATABASE}, url=${CLICKHOUSE_URL}, rpc_fallback=${options.rpcFallback}, dry_run=${options.dryRun})`,
-    );
-    console.log(
-      `Timeouts(ms): query=${formatTimeout(QUERY_TIMEOUT_MS)}, long_query=${formatTimeout(LONG_QUERY_TIMEOUT_MS)}, ddl=${formatTimeout(DDL_TIMEOUT_MS)}, mutation=${formatTimeout(MUTATION_TIMEOUT_MS)}, insert=${formatTimeout(INSERT_TIMEOUT_MS)}`,
     );
 
     const missingBefore = await countMissingTradeTimestamps(client);
@@ -293,12 +240,10 @@ async function main() {
           rpcConcurrency,
         );
         if (records.length > 0) {
-          const insertAbortSignal = getAbortSignal(INSERT_TIMEOUT_MS);
           await client.insert({
             table: "polymarket_blocks",
             values: records,
             format: "JSONEachRow",
-            ...(insertAbortSignal ? { abort_signal: insertAbortSignal } : {}),
           });
           console.log("Applying RPC-fetched block timestamps...");
           await refreshBlocksJoinTable(client);
