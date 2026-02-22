@@ -11,7 +11,8 @@
     "setup-data": "bash scripts/install-tools.sh && bash scripts/download.sh",
     "index": "bun run --cwd apps/indexer index",
     "scheduler": "bun run --cwd apps/indexer scheduler",
-    "migrate-parquet": "bun run --cwd apps/indexer migrate-parquet"
+    "migrate-parquet": "bun run --cwd apps/indexer migrate-parquet",
+    "backfill-trade-timestamps": "bun run --cwd apps/indexer backfill-trade-timestamps"
   },
   "trustedDependencies": [
     "protobufjs"
