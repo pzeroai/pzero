@@ -2,7 +2,10 @@
   "name": "@p0/api",
   "version": "0.0.1",
   "scripts": {
-    "dev": "bun --env-file=../../.env --watch src/server.ts"
+    "dev": "bun --env-file=../../.env --watch src/server.ts",
+    "ensure-clickhouse-analytics": "bun --env-file=../../.env run src/scripts/ensure-clickhouse-analytics.ts",
+    "backfill-pm-daily-volume-rollup": "bun --env-file=../../.env run src/scripts/backfill-pm-daily-volume-rollup.ts",
+    "backfill-pm-semantic-layer": "bun --env-file=../../.env run src/scripts/backfill-pm-semantic-layer.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

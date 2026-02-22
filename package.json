@@ -12,7 +12,10 @@
     "index": "bun run --cwd apps/indexer index",
     "scheduler": "bun run --cwd apps/indexer scheduler",
     "migrate-parquet": "bun run --cwd apps/indexer migrate-parquet",
-    "backfill-trade-timestamps": "bun run --cwd apps/indexer backfill-trade-timestamps"
+    "ensure-clickhouse-analytics": "bun run --cwd apps/api ensure-clickhouse-analytics",
+    "backfill-trade-timestamps": "bun run --cwd apps/indexer backfill-trade-timestamps",
+    "backfill-pm-daily-volume-rollup": "bun run --cwd apps/api backfill-pm-daily-volume-rollup",
+    "backfill-pm-semantic-layer": "bun run --cwd apps/api backfill-pm-semantic-layer"
   },
   "trustedDependencies": [
     "protobufjs"

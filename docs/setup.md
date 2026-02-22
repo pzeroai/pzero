@@ -66,6 +66,50 @@ bun run backfill-trade-timestamps -- --no-rpc-fallback
 
 RPC fallback is enabled by default. It fetches missing block timestamps from Polygon RPC and inserts them into `polymarket_blocks` before backfilling trade rows.
 
+## Backfill Polymarket Daily Volume Rollup
+
+To pre-populate the `pm_daily_volume_rollup` table used by `mv_pm_daily_volume`:
+
+```bash
+bun run backfill-pm-daily-volume-rollup
+```
+
+Useful flags:
+
+```bash
+bun run backfill-pm-daily-volume-rollup -- --force     # run even if rollup already has rows
+bun run backfill-pm-daily-volume-rollup -- --rebuild   # truncate and rebuild from polymarket_trades
+```
+
+## Ensure Analytics Objects (No Backfill)
+
+To recreate/enable views and ingest materialized views immediately, without running rollup/fact backfills:
+
+```bash
+bun run ensure-clickhouse-analytics
+```
+
+## Backfill Polymarket Semantic Layer
+
+To populate canonical Polymarket semantic tables (`pm_market_dim`, `pm_token_dim`, `pm_resolution_dim`, `pm_trade_fct`, `pm_trader_market_rollup_daily`):
+
+```bash
+bun run backfill-pm-semantic-layer
+```
+
+Useful flags:
+
+```bash
+bun run backfill-pm-semantic-layer -- --force     # repopulate even if pm_trade_fct already has rows
+bun run backfill-pm-semantic-layer -- --rebuild   # truncate and rebuild semantic tables from source tables
+```
+
+If rollup backfill is memory-heavy, reduce the per-window day span:
+
+```bash
+API_PM_SEMANTIC_ROLLUP_WINDOW_DAYS=3 bun run backfill-pm-semantic-layer -- --rebuild
+```
+
 ## Running
 
 ### Development
