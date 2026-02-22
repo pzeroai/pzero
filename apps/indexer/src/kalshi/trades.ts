@@ -1,11 +1,10 @@
 import { join } from "path";
 import { Indexer } from "../common/indexer";
 import { DATA_DIR as ROOT_DATA_DIR } from "../common/paths";
-import { ParquetStorage } from "../common/storage";
+import { ClickHouseStorage } from "../common/storage";
 import { deleteCursor, readCursor, writeCursor } from "../common/cursor";
 import { KalshiClient } from "./client";
 
-const DATA_DIR = join(ROOT_DATA_DIR, "kalshi/trades");
 const STATE_FILE = join(ROOT_DATA_DIR, "kalshi/.trades_state.json");
 const LEGACY_CURSOR_FILE = join(ROOT_DATA_DIR, "kalshi/.backfill_trades_cursor");
 const FLUSH_SIZE = Number(process.env.KALSHI_TRADES_FLUSH_SIZE || "10000");
@@ -78,7 +77,7 @@ export class KalshiTradesIndexer extends Indexer {
 
   async run(): Promise<void> {
     const client = new KalshiClient();
-    const storage = new ParquetStorage(DATA_DIR, "trades");
+    const storage = new ClickHouseStorage("kalshi_trades");
     let stopRequested = false;
     let forceStopRequested = false;
     let firstStopAt = 0;

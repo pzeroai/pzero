@@ -1,106 +1,97 @@
-import duckdb from "duckdb";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
-import { join } from "path";
-import { Glob } from "bun";
+import { createClient, type ClickHouseClient } from "@clickhouse/client";
+import { CLICKHOUSE_TABLES, type ClickHouseTableName } from "@p0/shared";
 
 const CHUNK_SIZE = 10_000;
+const CLICKHOUSE_URL = process.env.CLICKHOUSE_URL || "http://localhost:8123";
+const CLICKHOUSE_USER = process.env.CLICKHOUSE_USER || "default";
+const CLICKHOUSE_PASSWORD = process.env.CLICKHOUSE_PASSWORD || "";
+const CLICKHOUSE_DATABASE = process.env.CLICKHOUSE_DATABASE || "default";
 
-export class ParquetStorage {
-  private db: duckdb.Database;
-  private conn: duckdb.Connection;
-  private nextChunkIndex: number | null = null;
-  private stageDir: string;
+function sqlQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
 
-  constructor(private dataDir: string, private filePrefix: string = "data") {
-    mkdirSync(dataDir, { recursive: true });
-    this.stageDir = join(dataDir, ".staging");
-    mkdirSync(this.stageDir, { recursive: true });
-    this.db = new duckdb.Database(":memory:");
-    this.conn = this.db.connect();
+function quoteIdentifier(identifier: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+    throw new Error(`Unsafe identifier: ${identifier}`);
+  }
+  return `\`${identifier}\``;
+}
+
+function normalizeRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (value === undefined || value === null) {
+      normalized[key] = null;
+      continue;
+    }
+    if (value instanceof Date) {
+      normalized[key] = value.toISOString();
+      continue;
+    }
+    if (typeof value === "boolean") {
+      normalized[key] = value ? 1 : 0;
+      continue;
+    }
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      normalized[key] = null;
+      continue;
+    }
+    normalized[key] = value;
+  }
+  return normalized;
+}
+
+export class ClickHouseStorage {
+  private client: ClickHouseClient;
+  private initPromise: Promise<void>;
+
+  constructor(private tableName: ClickHouseTableName) {
+    this.client = createClient({
+      url: CLICKHOUSE_URL,
+      username: CLICKHOUSE_USER,
+      password: CLICKHOUSE_PASSWORD,
+      database: CLICKHOUSE_DATABASE,
+    });
+    this.initPromise = this.initialize();
   }
 
-  private query(sql: string): Promise<Record<string, unknown>[]> {
-    return new Promise((resolve, reject) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (this.conn as any).all(sql, (err: Error | null, rows: Record<string, unknown>[]) => {
-        if (err) reject(err);
-        else resolve(rows ?? []);
-      });
+  private async initialize(): Promise<void> {
+    const ddl = CLICKHOUSE_TABLES[this.tableName];
+    await this.client.command({
+      query: ddl,
+      abort_signal: AbortSignal.timeout(180_000),
     });
   }
 
+  private async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+    await this.initPromise;
+    const result = await this.client.query({
+      query: sql,
+      format: "JSONEachRow",
+      abort_signal: AbortSignal.timeout(180_000),
+    });
+    return await result.json<T>();
+  }
+
   async loadExistingKeys(keyColumn: string): Promise<Set<string>> {
-    const pattern = join(this.dataDir, `${this.filePrefix}_*.parquet`);
-    const glob = new Glob(`${this.filePrefix}_*.parquet`);
-    const files = [...glob.scanSync(this.dataDir)];
-    if (files.length === 0) return new Set();
-
-    try {
-      const rows = await this.query(
-        `SELECT DISTINCT "${keyColumn}" AS k FROM '${pattern}'`,
-      );
-      return new Set(rows.map((r) => String(r.k)));
-    } catch {
-      return new Set();
-    }
-  }
-
-  private computeNextChunkIndex(): number {
-    const glob = new Glob(`${this.filePrefix}_*.parquet`);
-    const files = [...glob.scanSync(this.dataDir)];
-    if (files.length === 0) return 0;
-
-    let maxIdx = 0;
-    for (const f of files) {
-      const parts = f.replace(".parquet", "").split("_");
-      const idx = parseInt(parts[1], 10);
-      if (!isNaN(idx) && idx > maxIdx) maxIdx = idx;
-    }
-    return maxIdx + CHUNK_SIZE;
-  }
-
-  getNextChunkIndex(): number {
-    if (this.nextChunkIndex == null) {
-      this.nextChunkIndex = this.computeNextChunkIndex();
-    }
-    const chunkIdx = this.nextChunkIndex;
-    this.nextChunkIndex += CHUNK_SIZE;
-    return chunkIdx;
+    const col = quoteIdentifier(keyColumn);
+    const rows = await this.query<{ k: unknown }>(
+      `SELECT DISTINCT ${col} AS k FROM ${this.tableName}`,
+    );
+    return new Set(rows.map((row) => String(row.k)));
   }
 
   async writeChunk(records: Record<string, unknown>[]): Promise<void> {
     if (records.length === 0) return;
-
-    const chunkIdx = this.getNextChunkIndex();
-    const chunkPath = join(this.dataDir, `${this.filePrefix}_${chunkIdx}_${chunkIdx + CHUNK_SIZE}.parquet`);
-    const stagePath = join(
-      this.stageDir,
-      `${this.filePrefix}_${chunkIdx}_${Date.now()}_${Math.random().toString(16).slice(2)}.ndjson`,
-    );
-
-    // Keep stable schema behavior by using columns from the first record.
-    const columns = Object.keys(records[0]);
-    const ndjson = records
-      .map((row) => {
-        const normalized: Record<string, unknown> = {};
-        for (const col of columns) {
-          const value = row[col];
-          if (value === undefined || value === null) normalized[col] = null;
-          else if (value instanceof Date) normalized[col] = value.toISOString();
-          else normalized[col] = value;
-        }
-        return JSON.stringify(normalized);
-      })
-      .join("\n");
-
-    writeFileSync(stagePath, ndjson, "utf-8");
-    try {
-      await this.query(
-        `COPY (SELECT * FROM read_json_auto('${stagePath}', format='newline_delimited')) TO '${chunkPath}' (FORMAT PARQUET)`,
-      );
-    } finally {
-      rmSync(stagePath, { force: true });
-    }
+    await this.initPromise;
+    const values = records.map(normalizeRecord);
+    await this.client.insert({
+      table: this.tableName,
+      values,
+      format: "JSONEachRow",
+      abort_signal: AbortSignal.timeout(180_000),
+    });
   }
 
   async writeBatched(records: Record<string, unknown>[]): Promise<number> {
@@ -117,61 +108,57 @@ export class ParquetStorage {
     return total;
   }
 
-  hasData(): boolean {
-    const glob = new Glob(`${this.filePrefix}_*.parquet`);
-    return [...glob.scanSync(this.dataDir)].length > 0;
+  async hasData(): Promise<boolean> {
+    const rows = await this.query<{ c: number | string }>(
+      `SELECT count(*) AS c FROM ${this.tableName} LIMIT 1`,
+    );
+    if (rows.length === 0) return false;
+    return Number(rows[0].c) > 0;
   }
 
   async queryScalar<T = unknown>(sql: string): Promise<T | null> {
-    const pattern = join(this.dataDir, `${this.filePrefix}_*.parquet`);
     try {
-      const rows = await this.query(sql.replace("{files}", `'${pattern}'`));
+      const query = sql.replace("{files}", this.tableName);
+      const rows = await this.query<Record<string, unknown>>(query);
       if (rows.length === 0) return null;
-      const val = Object.values(rows[0])[0];
-      return (val ?? null) as T | null;
+      const value = Object.values(rows[0])[0];
+      return (value ?? null) as T | null;
     } catch {
       return null;
     }
   }
 
-  /**
-   * Check which keys from a small batch already exist in parquet files.
-   * Much cheaper than loading ALL keys into memory.
-   */
   async findExistingKeys(keyColumn: string, keys: string[]): Promise<Set<string>> {
     if (keys.length === 0) return new Set();
-    const pattern = join(this.dataDir, `${this.filePrefix}_*.parquet`);
-    const glob = new Glob(`${this.filePrefix}_*.parquet`);
-    const files = [...glob.scanSync(this.dataDir)];
-    if (files.length === 0) return new Set();
+    const col = quoteIdentifier(keyColumn);
+    const inList = keys.map((k) => sqlQuote(k)).join(",");
 
     try {
-      const inList = keys.map((k) => `'${k.replace(/'/g, "''")}'`).join(",");
-      const rows = await this.query(
-        `SELECT DISTINCT "${keyColumn}" AS k FROM '${pattern}' WHERE "${keyColumn}" IN (${inList})`,
+      const rows = await this.query<{ k: unknown }>(
+        `SELECT DISTINCT ${col} AS k FROM ${this.tableName} WHERE ${col} IN (${inList})`,
       );
-      return new Set(rows.map((r) => String(r.k)));
+      return new Set(rows.map((row) => String(row.k)));
     } catch {
       return new Set();
     }
   }
 
   async getMaxValue(column: string): Promise<number | null> {
-    const result = await this.queryScalar<number>(
-      `SELECT MAX("${column}") AS v FROM {files}`,
+    const col = quoteIdentifier(column);
+    const result = await this.queryScalar<number | string>(
+      `SELECT max(${col}) AS v FROM ${this.tableName}`,
     );
     return result != null ? Number(result) : null;
   }
 
   async getRowCount(): Promise<number> {
-    const result = await this.queryScalar<number>(
-      `SELECT COUNT(*) AS v FROM {files}`,
+    const result = await this.queryScalar<number | string>(
+      `SELECT count(*) AS v FROM ${this.tableName}`,
     );
     return result != null ? Number(result) : 0;
   }
 
   close(): void {
-    // Intentionally skip db.close() — DuckDB's NAPI cleanup crashes Bun.
-    // process.exit(0) in cli.ts handles teardown safely.
+    void this.client.close();
   }
 }

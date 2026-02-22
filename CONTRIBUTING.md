@@ -12,7 +12,7 @@
    cp .env.example .env
    ```
 4. Set your `LLM_API_KEY` in `.env`
-5. Place parquet data in `./data/` (see [Setup Guide](docs/setup.md#data-setup))
+5. Configure ClickHouse credentials + `POLYGON_RPC` in `.env` (see [Setup Guide](docs/setup.md))
 6. Start the dev servers:
    ```bash
    bun run dev
@@ -30,7 +30,7 @@
 ### API (`apps/api/`)
 
 - Routes go in `src/routes/`
-- Database access through `duckdbService` in `src/services/duckdb.ts`
+- Database access through `clickhouseService` in `src/services/clickhouse.ts`
 - SQL validation rules in `src/lib/sql-validator.ts`
 - LLM system prompt in `src/lib/system-prompt.ts`
 - Run tests: `bun test apps/api/src/__tests__/`
@@ -54,11 +54,10 @@
 
 ## Adding New Data Sources
 
-1. Place parquet files in a subdirectory under `DATA_DIR`
-2. Add path constants in `apps/api/src/services/duckdb.ts`
-3. Add placeholder replacement in `resolvePaths()`
-4. Document the schema in the system prompt (`apps/api/src/lib/system-prompt.ts`)
-5. Optionally add materialized views in `apps/api/src/services/materialized-views.ts`
+1. Add/extend ClickHouse base tables in `packages/shared/src/clickhouse.ts`
+2. Update ingestion logic in `apps/indexer/src/`
+3. Document schema guidance in `apps/api/src/lib/system-prompt.ts`
+4. Optionally add derived views in `apps/api/src/services/materialized-views.ts`
 
 ## Pull Requests
 

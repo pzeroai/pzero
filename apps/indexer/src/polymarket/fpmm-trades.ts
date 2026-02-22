@@ -1,11 +1,10 @@
 import { join } from "path";
 import { Indexer } from "../common/indexer";
 import { DATA_DIR as ROOT_DATA_DIR } from "../common/paths";
-import { ParquetStorage } from "../common/storage";
+import { ClickHouseStorage } from "../common/storage";
 import { readCursor, writeCursor, deleteCursor } from "../common/cursor";
 import { PolygonClient, FPMM_START_BLOCK } from "./blockchain";
 
-const DATA_DIR = join(ROOT_DATA_DIR, "polymarket/legacy_trades");
 const CURSOR_FILE = join(ROOT_DATA_DIR, "polymarket/.legacy_backfill_block_cursor");
 
 export class PolymarketFPMMTradesIndexer extends Indexer {
@@ -20,7 +19,7 @@ export class PolymarketFPMMTradesIndexer extends Indexer {
 
   async run(): Promise<void> {
     const client = new PolygonClient();
-    const storage = new ParquetStorage(DATA_DIR, "trades");
+    const storage = new ClickHouseStorage("polymarket_legacy_trades");
     try {
       const currentBlock = await client.getBlockNumber();
 

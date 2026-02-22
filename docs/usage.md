@@ -2,7 +2,7 @@
 
 ## Asking Questions
 
-Type natural language questions in the chat panel on the left. The LLM generates a SQL query, executes it against DuckDB, and displays the results as an interactive chart on the dashboard.
+Type natural language questions in the chat panel on the left. The LLM generates a SQL query, executes it against ClickHouse, and displays the results as an interactive chart on the dashboard.
 
 Press **Enter** to send, **Shift+Enter** for a new line.
 

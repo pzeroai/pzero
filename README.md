@@ -2,7 +2,7 @@
 
 > vibe analytics for prediction markets
 
-Natural language analytics dashboard for Kalshi and Polymarket prediction market data. Ask questions in plain English, get charts. Powered by LLM-generated SQL over DuckDB.
+Natural language analytics dashboard for Kalshi and Polymarket prediction market data. Ask questions in plain English, get charts. Powered by LLM-generated SQL over ClickHouse.
 
 ## Features
 
@@ -33,9 +33,9 @@ Natural language analytics dashboard for Kalshi and Polymarket prediction market
 
 ```
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  React Frontend  │     │   Fastify API    │     │     DuckDB       │
-│  Vite + TW4      │────>│   /api/query     │────>│   (in-memory)    │
-│  port 5173       │     │   port 3001      │     │   parquet files  │
+│  React Frontend  │     │   Fastify API    │     │   ClickHouse     │
+│  Vite + TW4      │────>│   /api/query     │────>│   analytics db   │
+│  port 5173       │     │   port 3001      │     │   port 8123      │
 └──────────────────┘     └──────────────────┘     └──────────────────┘
                                 │
                                 v
@@ -50,7 +50,7 @@ Natural language analytics dashboard for Kalshi and Polymarket prediction market
 | Layer     | Technology                       |
 |-----------|----------------------------------|
 | Runtime   | Bun                              |
-| API       | Fastify, DuckDB, OpenAI SDK      |
+| API       | Fastify, ClickHouse, OpenAI SDK  |
 | Frontend  | React 19, Vite 6, Tailwind CSS 4 |
 | Charts    | Recharts                         |
 | State     | Zustand                          |
@@ -64,7 +64,7 @@ Natural language analytics dashboard for Kalshi and Polymarket prediction market
 
 - [Bun](https://bun.sh) v1.0+
 - An OpenAI API key (or any OpenAI-compatible provider)
-- Prediction market data in parquet format ([setup guide](docs/setup.md#data-setup))
+- ClickHouse instance + Polygon RPC access ([setup guide](docs/setup.md))
 
 ### Install
 
@@ -74,17 +74,17 @@ cd p0
 bun install
 ```
 
-### Get Data
-
-```bash
-bun run setup-data
-```
-
 ### Configure
 
 ```bash
 cp .env.example .env
 # Edit .env — at minimum, set LLM_API_KEY
+```
+
+### Optional: Import Existing Parquet Data
+
+```bash
+bun run migrate-parquet
 ```
 
 ### Run

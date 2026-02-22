@@ -8,10 +8,10 @@
       "name": "@p0/api",
       "version": "0.0.1",
       "dependencies": {
+        "@clickhouse/client": "^1.12.1",
         "@fastify/cors": "^10.0.0",
         "@fastify/rate-limit": "^10.0.0",
         "@p0/shared": "workspace:*",
-        "duckdb": "^1.2.0",
         "fastify": "^5.2.0",
         "lru-cache": "^11.0.0",
         "openai": "^4.80.0",
@@ -26,6 +26,7 @@
       "name": "@p0/indexer",
       "version": "0.0.1",
       "dependencies": {
+        "@clickhouse/client": "^1.12.1",
         "duckdb": "^1.2.0",
         "node-cron": "^3.0.0",
         "viem": "^2.0.0",
@@ -106,6 +107,10 @@
     "@babel/traverse": ["@babel/traverse@7.29.0", "", { "dependencies": { "@babel/code-frame": "^7.29.0", "@babel/generator": "^7.29.0", "@babel/helper-globals": "^7.28.0", "@babel/parser": "^7.29.0", "@babel/template": "^7.28.6", "@babel/types": "^7.29.0", "debug": "^4.3.1" } }, "sha512-4HPiQr0X7+waHfyXPZpWPfWL/J7dcN1mx9gL6WdQVMbPnF3+ZhSMs8tCxN7oHddJE9fhNE7+lxdnlyemKfJRuA=="],
 
     "@babel/types": ["@babel/types@7.29.0", "", { "dependencies": { "@babel/helper-string-parser": "^7.27.1", "@babel/helper-validator-identifier": "^7.28.5" } }, "sha512-LwdZHpScM4Qz8Xw2iKSzS+cfglZzJGvofQICy7W7v4caru4EaAmyUuO6BGrbyQ2mYV11W0U8j5mBhd14dd3B0A=="],
+
+    "@clickhouse/client": ["@clickhouse/client@1.17.0", "", { "dependencies": { "@clickhouse/client-common": "1.17.0" } }, "sha512-Y3DQoamKZ/Iyosoq7Lj7lqpDkQDK4R/5mI52yJs4ZLPIO+d6/CYDqTbFBIb4No3C/AlXUYE4TKhj/kXDpe6rOA=="],
+
+    "@clickhouse/client-common": ["@clickhouse/client-common@1.17.0", "", {}, "sha512-MiwwgXViFAQA2YZkN4ymF1ynzG0K49KeSX9/iOcmJetWkxqSekDdpyp1GjwATWa9R215uQ+hGzJtJujeQVZZIw=="],
 
     "@esbuild/aix-ppc64": ["@esbuild/aix-ppc64@0.25.12", "", { "os": "aix", "cpu": "ppc64" }, "sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA=="],
 

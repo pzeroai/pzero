@@ -1,11 +1,10 @@
 import { join } from "path";
 import { Indexer } from "../common/indexer";
 import { DATA_DIR as ROOT_DATA_DIR } from "../common/paths";
-import { ParquetStorage } from "../common/storage";
+import { ClickHouseStorage } from "../common/storage";
 import { readCursor, writeCursor, deleteCursor } from "../common/cursor";
 import { PolygonClient, CTF_EXCHANGE, NEGRISK_CTF_EXCHANGE, POLYMARKET_START_BLOCK } from "./blockchain";
 
-const DATA_DIR = join(ROOT_DATA_DIR, "polymarket/trades");
 const CURSOR_FILE = join(ROOT_DATA_DIR, "polymarket/.backfill_block_cursor");
 const FETCH_CONCURRENCY = Number(process.env.PM_TRADES_FETCH_CONCURRENCY || "4");
 const CHUNK_SIZE = Number(process.env.PM_TRADES_CHUNK_SIZE || "1000");
@@ -21,13 +20,13 @@ export class PolymarketTradesIndexer extends Indexer {
   private chunkSize: number;
 
   constructor(chunkSize = CHUNK_SIZE) {
-    super("polymarket_trades", "Backfills Polymarket trades from Polygon blockchain to parquet files");
+    super("polymarket_trades", "Backfills Polymarket trades from Polygon blockchain to ClickHouse");
     this.chunkSize = Math.max(1, Math.floor(chunkSize));
   }
 
   async run(): Promise<void> {
     const client = new PolygonClient();
-    const storage = new ParquetStorage(DATA_DIR, "trades");
+    const storage = new ClickHouseStorage("polymarket_trades");
     try {
       const currentBlock = await client.getBlockNumber();
 

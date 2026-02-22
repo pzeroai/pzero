@@ -1,11 +1,10 @@
 import { join } from "path";
 import { Indexer } from "../common/indexer";
 import { DATA_DIR as ROOT_DATA_DIR } from "../common/paths";
-import { ParquetStorage } from "../common/storage";
+import { ClickHouseStorage } from "../common/storage";
 import { readCursor, writeCursor, deleteCursor } from "../common/cursor";
 import { PolymarketClient } from "./client";
 
-const DATA_DIR = join(ROOT_DATA_DIR, "polymarket/markets");
 const STATE_FILE = join(ROOT_DATA_DIR, "polymarket/.markets_forward_state.json");
 const LEGACY_STATE_FILE = join(ROOT_DATA_DIR, "polymarket/.markets_head_state.json");
 const LEGACY_WATERMARK_STATE_FILE = join(
@@ -70,7 +69,7 @@ export class PolymarketMarketsIndexer extends Indexer {
 
   async run(): Promise<void> {
     const client = new PolymarketClient();
-    const storage = new ParquetStorage(DATA_DIR, "markets");
+    const storage = new ClickHouseStorage("polymarket_markets");
 
     try {
       // Cleanup legacy checkpoint files from previous strategies.

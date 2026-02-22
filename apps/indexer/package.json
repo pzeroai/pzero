@@ -3,10 +3,11 @@
   "version": "0.0.1",
   "scripts": {
     "index": "bun --env-file=../../.env run src/cli.ts",
-    "scheduler": "bun --env-file=../../.env run src/scheduler.ts"
+    "scheduler": "bun --env-file=../../.env run src/scheduler.ts",
+    "migrate-parquet": "bun --env-file=../../.env run src/migrate-parquet.ts"
   },
   "dependencies": {
-    "duckdb": "^1.2.0",
+    "@clickhouse/client": "^1.12.1",
     "viem": "^2.0.0",
     "node-cron": "^3.0.0"
   },

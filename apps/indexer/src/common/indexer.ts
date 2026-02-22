@@ -12,7 +12,6 @@ export abstract class Indexer {
       import("../kalshi/trades"),
       import("../polymarket/markets"),
       import("../polymarket/trades"),
-      import("../polymarket/trades-backfill-timestamps"),
       import("../polymarket/blocks"),
       import("../polymarket/fpmm-trades"),
     ]);

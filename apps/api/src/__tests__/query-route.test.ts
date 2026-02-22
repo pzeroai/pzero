@@ -36,7 +36,7 @@ describe("POST /api/query", () => {
       method: "POST",
       url: "/api/query",
       payload: {
-        message: "How many total markets are there? Just return a simple count using SELECT COUNT(*) from the markets parquet files.",
+        message: "How many total markets are there? Just return a simple count using SELECT COUNT(*) from kalshi_markets.",
         history: [],
       },
     });

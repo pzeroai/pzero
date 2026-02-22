@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { QueryRequest, QueryResponse } from "@p0/shared";
-import { duckdbService } from "../services/duckdb";
+import { clickhouseService } from "../services/clickhouse";
 import { generateQuery, type LLMQueryResult } from "../services/llm";
 import { validateSQL } from "../lib/sql-validator";
 import {
@@ -56,14 +56,13 @@ export const queryRoutes: FastifyPluginAsync = async (app) => {
       return reply.status(400).send({ error: validation.error });
     }
 
-    // 3. Resolve paths and execute (with query cache)
-    const resolvedSQL = duckdbService.resolvePaths(llmResult.sql);
-    const safeSQL = buildSafeExecutionSQL(resolvedSQL);
+    // 4. Execute (with query cache)
+    const safeSQL = buildSafeExecutionSQL(llmResult.sql);
     let data = getCachedQuery(safeSQL);
 
     if (!data) {
       try {
-        data = await duckdbService.query(safeSQL);
+        data = await clickhouseService.query(safeSQL);
       } catch (err) {
         // Self-correction: send error back to LLM for one retry
         const sqlError = err instanceof Error ? err.message : String(err);
@@ -87,8 +86,7 @@ export const queryRoutes: FastifyPluginAsync = async (app) => {
             return reply.status(400).send({ error: retryValidation.error });
           }
 
-          const retrySQL = duckdbService.resolvePaths(llmResult.sql);
-          data = await duckdbService.query(buildSafeExecutionSQL(retrySQL));
+          data = await clickhouseService.query(buildSafeExecutionSQL(llmResult.sql));
         } catch {
           return reply.status(400).send({
             error: `Query failed: ${sqlError}`,

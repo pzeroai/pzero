@@ -41,7 +41,7 @@ const start = async () => {
     }
 
     if (MV_BUILD_MODE !== "sync") {
-      // Default mode: do not block API startup on large parquet scans.
+      // Default mode: do not block API startup while views are recreated.
       void buildViews();
     }
   } catch (err) {
