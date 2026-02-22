@@ -7,6 +7,7 @@ const CLICKHOUSE_PASSWORD = process.env.CLICKHOUSE_PASSWORD || "";
 const CLICKHOUSE_DATABASE = process.env.CLICKHOUSE_DATABASE || "default";
 const RPC_FALLBACK_CONCURRENCY = Number(process.env.PM_TRADES_TS_BACKFILL_RPC_CONCURRENCY || "10");
 const BLOCKS_JOIN_TABLE = "pm_blocks_join_backfill";
+const MISSING_TIMESTAMP_WHERE = "timestamp IS NULL OR timestamp = ''";
 
 interface CliOptions {
   rpcFallback: boolean;
@@ -64,22 +65,65 @@ async function command(client: ClickHouseClient, query: string, timeout = 300_00
   });
 }
 
+async function countMissingTradeTimestamps(client: ClickHouseClient): Promise<number> {
+  return await fetchCount(
+    client,
+    `
+      SELECT count() AS c
+      FROM polymarket_trades
+      WHERE ${MISSING_TIMESTAMP_WHERE}
+    `,
+  );
+}
+
+async function refreshBlocksJoinTable(client: ClickHouseClient): Promise<void> {
+  await command(client, `DROP TABLE IF EXISTS ${BLOCKS_JOIN_TABLE}`);
+  await command(
+    client,
+    `
+      CREATE TABLE ${BLOCKS_JOIN_TABLE}
+      ENGINE = Join(ANY, LEFT, block_number)
+      AS
+      SELECT
+        block_number,
+        any(timestamp) AS timestamp
+      FROM polymarket_blocks
+      GROUP BY block_number
+    `,
+    300_000,
+  );
+}
+
+async function applyTradeTimestampUpdate(
+  client: ClickHouseClient,
+  joinTableRef: string,
+): Promise<void> {
+  await command(
+    client,
+    `
+      ALTER TABLE polymarket_trades
+      UPDATE timestamp = nullIf(joinGet('${joinTableRef}', 'timestamp', block_number), '')
+      WHERE (${MISSING_TIMESTAMP_WHERE})
+        AND joinGet('${joinTableRef}', 'timestamp', block_number) != ''
+      SETTINGS mutations_sync = 2
+    `,
+    600_000,
+  );
+}
+
 async function fetchMissingBlocks(client: ClickHouseClient): Promise<number[]> {
   const rows = await fetchRows<MissingBlockRow>(
     client,
     `
-      SELECT t.block_number AS block_number
-      FROM (
-        SELECT DISTINCT block_number
-        FROM polymarket_trades
-        WHERE timestamp IS NULL OR timestamp = ''
-      ) t
-      LEFT JOIN (
-        SELECT DISTINCT block_number
-        FROM polymarket_blocks
-      ) b ON t.block_number = b.block_number
-      WHERE b.block_number IS NULL
-      ORDER BY t.block_number
+      SELECT DISTINCT t.block_number AS block_number
+      FROM polymarket_trades t
+      WHERE (${MISSING_TIMESTAMP_WHERE})
+        AND t.block_number NOT IN (
+          SELECT DISTINCT block_number
+          FROM polymarket_blocks
+          WHERE timestamp IS NOT NULL AND timestamp != ''
+        )
+      ORDER BY block_number
     `,
     240_000,
   );
@@ -142,19 +186,47 @@ async function main() {
       `Backfilling polymarket_trades.timestamp (db=${CLICKHOUSE_DATABASE}, url=${CLICKHOUSE_URL}, rpc_fallback=${options.rpcFallback}, dry_run=${options.dryRun})`,
     );
 
-    const missingBefore = await fetchCount(
-      client,
-      `
-        SELECT count() AS c
-        FROM polymarket_trades
-        WHERE timestamp IS NULL OR timestamp = ''
-      `,
-    );
+    const missingBefore = await countMissingTradeTimestamps(client);
     if (missingBefore === 0) {
       console.log("No missing timestamps in polymarket_trades; nothing to do.");
       return;
     }
     console.log(`Missing timestamp rows before backfill: ${missingBefore}`);
+
+    if (options.dryRun) {
+      const missingBlocks = await fetchMissingBlocks(client);
+      console.log(
+        `Missing block timestamp references after existing-block join pass: ${missingBlocks.length}`,
+      );
+      if (missingBlocks.length > 0) {
+        if (!options.rpcFallback) {
+          console.log(
+            "RPC fallback disabled. Rows for these blocks will remain null unless polymarket_blocks is populated first.",
+          );
+        } else {
+          console.log(
+            `[dry-run] would fetch ${missingBlocks.length} block timestamps from RPC with concurrency=${rpcConcurrency}`,
+          );
+        }
+      }
+      console.log("[dry-run] Skipping UPDATE mutations.");
+      return;
+    }
+
+    console.log("Applying existing polymarket_blocks timestamps...");
+    await refreshBlocksJoinTable(client);
+    await applyTradeTimestampUpdate(client, joinTableRef);
+
+    const missingAfterJoinPass = await countMissingTradeTimestamps(client);
+    console.log(
+      `Missing timestamp rows after existing-block pass: ${missingAfterJoinPass}`,
+    );
+    if (missingAfterJoinPass === 0) {
+      console.log(
+        `Backfill complete: updated=${missingBefore}, missing_before=${missingBefore}, missing_after=0`,
+      );
+      return;
+    }
 
     const missingBlocks = await fetchMissingBlocks(client);
     if (missingBlocks.length > 0) {
@@ -173,61 +245,24 @@ async function main() {
           missingBlocks,
           rpcConcurrency,
         );
-        if (records.length > 0 && !options.dryRun) {
+        if (records.length > 0) {
           await client.insert({
             table: "polymarket_blocks",
             values: records,
             format: "JSONEachRow",
             abort_signal: AbortSignal.timeout(300_000),
           });
+          console.log("Applying RPC-fetched block timestamps...");
+          await refreshBlocksJoinTable(client);
+          await applyTradeTimestampUpdate(client, joinTableRef);
         }
         console.log(
-          `${options.dryRun ? "[dry-run] would insert" : "Inserted"} ${records.length} block timestamp rows into polymarket_blocks`,
+          `Inserted ${records.length} block timestamp rows into polymarket_blocks`,
         );
       }
     }
 
-    if (options.dryRun) {
-      console.log("[dry-run] Skipping join-table creation and UPDATE mutation.");
-      return;
-    }
-
-    await command(client, `DROP TABLE IF EXISTS ${BLOCKS_JOIN_TABLE}`);
-    await command(
-      client,
-      `
-        CREATE TABLE ${BLOCKS_JOIN_TABLE}
-        ENGINE = Join(ANY, LEFT, block_number)
-        AS
-        SELECT
-          block_number,
-          any(timestamp) AS timestamp
-        FROM polymarket_blocks
-        GROUP BY block_number
-      `,
-      300_000,
-    );
-
-    await command(
-      client,
-      `
-        ALTER TABLE polymarket_trades
-        UPDATE timestamp = nullIf(joinGet('${joinTableRef}', 'timestamp', block_number), '')
-        WHERE (timestamp IS NULL OR timestamp = '')
-          AND joinGet('${joinTableRef}', 'timestamp', block_number) != ''
-        SETTINGS mutations_sync = 2
-      `,
-      600_000,
-    );
-
-    const missingAfter = await fetchCount(
-      client,
-      `
-        SELECT count() AS c
-        FROM polymarket_trades
-        WHERE timestamp IS NULL OR timestamp = ''
-      `,
-    );
+    const missingAfter = await countMissingTradeTimestamps(client);
     const updated = Math.max(0, missingBefore - missingAfter);
     console.log(
       `Backfill complete: updated=${updated}, missing_before=${missingBefore}, missing_after=${missingAfter}`,
