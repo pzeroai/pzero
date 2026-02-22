@@ -7,6 +7,8 @@ const CLICKHOUSE_PASSWORD = process.env.CLICKHOUSE_PASSWORD || "";
 const CLICKHOUSE_DATABASE = process.env.CLICKHOUSE_DATABASE || "default";
 const RPC_FALLBACK_CONCURRENCY = Number(process.env.PM_TRADES_TS_BACKFILL_RPC_CONCURRENCY || "20");
 const STEP_PROGRESS_LOG_MS = Number(process.env.PM_TRADES_TS_BACKFILL_STEP_PROGRESS_LOG_MS || "30000");
+const JOIN_READY_TIMEOUT_MS = Number(process.env.PM_TRADES_TS_BACKFILL_JOIN_READY_TIMEOUT_MS || "120000");
+const JOIN_READY_RETRY_MS = Number(process.env.PM_TRADES_TS_BACKFILL_JOIN_READY_RETRY_MS || "500");
 const BLOCKS_JOIN_TABLE = "pm_blocks_join_backfill";
 const MISSING_TIMESTAMP_WHERE = "timestamp IS NULL OR timestamp = ''";
 
@@ -46,6 +48,10 @@ function formatDurationMs(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function runStep<T>(
@@ -118,6 +124,49 @@ async function countMissingTradeTimestamps(client: ClickHouseClient): Promise<nu
   );
 }
 
+function isJoinNotInitializedError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("NOT_INITIALIZED")
+    || message.includes("WAITED_FOR_BACKEND_TABLE");
+}
+
+function quoteCompoundIdentifier(name: string): string {
+  return name
+    .split(".")
+    .map((part) => `\`${part.replaceAll("`", "``")}\``)
+    .join(".");
+}
+
+async function waitForJoinTableReady(
+  client: ClickHouseClient,
+  joinTableRef: string,
+): Promise<void> {
+  const timeoutMs = Number.isFinite(JOIN_READY_TIMEOUT_MS)
+    ? Math.max(0, Math.floor(JOIN_READY_TIMEOUT_MS))
+    : 120_000;
+  const retryMs = Number.isFinite(JOIN_READY_RETRY_MS)
+    ? Math.max(50, Math.floor(JOIN_READY_RETRY_MS))
+    : 500;
+  const startedAt = Date.now();
+  const joinTableIdent = quoteCompoundIdentifier(joinTableRef);
+  let lastErrorMessage = "unknown initialization error";
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    try {
+      await fetchRows(client, `SELECT 1 AS ok FROM ${joinTableIdent} LIMIT 1`);
+      return;
+    } catch (err) {
+      if (!isJoinNotInitializedError(err)) throw err;
+      lastErrorMessage = err instanceof Error ? err.message : String(err);
+      await sleep(retryMs);
+    }
+  }
+
+  throw new Error(
+    `Join table ${joinTableRef} was not initialized within ${timeoutMs}ms: ${lastErrorMessage}`,
+  );
+}
+
 async function refreshBlocksJoinTable(client: ClickHouseClient): Promise<void> {
   await command(client, `DROP TABLE IF EXISTS ${BLOCKS_JOIN_TABLE}`);
   await command(
@@ -125,6 +174,7 @@ async function refreshBlocksJoinTable(client: ClickHouseClient): Promise<void> {
     `
       CREATE TABLE ${BLOCKS_JOIN_TABLE}
       ENGINE = Join(ANY, LEFT, block_number)
+      SETTINGS persistent = 0
       AS
       SELECT
         block_number,
@@ -139,6 +189,7 @@ async function applyTradeTimestampUpdate(
   client: ClickHouseClient,
   joinTableRef: string,
 ): Promise<void> {
+  await waitForJoinTableReady(client, joinTableRef);
   await command(
     client,
     `
