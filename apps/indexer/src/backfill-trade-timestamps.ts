@@ -6,6 +6,7 @@ const CLICKHOUSE_USER = process.env.CLICKHOUSE_USER || "default";
 const CLICKHOUSE_PASSWORD = process.env.CLICKHOUSE_PASSWORD || "";
 const CLICKHOUSE_DATABASE = process.env.CLICKHOUSE_DATABASE || "default";
 const RPC_FALLBACK_CONCURRENCY = Number(process.env.PM_TRADES_TS_BACKFILL_RPC_CONCURRENCY || "20");
+const STEP_PROGRESS_LOG_MS = Number(process.env.PM_TRADES_TS_BACKFILL_STEP_PROGRESS_LOG_MS || "30000");
 const BLOCKS_JOIN_TABLE = "pm_blocks_join_backfill";
 const MISSING_TIMESTAMP_WHERE = "timestamp IS NULL OR timestamp = ''";
 
@@ -39,6 +40,44 @@ function toNumber(value: number | string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function formatDurationMs(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
+}
+
+async function runStep<T>(
+  label: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  console.log(`[start] ${label}`);
+  const progressIntervalMs = Number.isFinite(STEP_PROGRESS_LOG_MS)
+    ? Math.max(0, Math.floor(STEP_PROGRESS_LOG_MS))
+    : 30_000;
+  const ticker = progressIntervalMs > 0
+    ? setInterval(() => {
+      const elapsed = formatDurationMs(Date.now() - startedAt);
+      console.log(`[progress] ${label} (elapsed=${elapsed})`);
+    }, progressIntervalMs)
+    : null;
+
+  try {
+    const result = await fn();
+    const elapsed = formatDurationMs(Date.now() - startedAt);
+    console.log(`[done] ${label} (elapsed=${elapsed})`);
+    return result;
+  } catch (err) {
+    const elapsed = formatDurationMs(Date.now() - startedAt);
+    console.error(`[error] ${label} failed (elapsed=${elapsed})`);
+    throw err;
+  } finally {
+    if (ticker) clearInterval(ticker);
+  }
+}
+
 async function fetchRows<T = Record<string, unknown>>(
   client: ClickHouseClient,
   query: string,
@@ -46,6 +85,9 @@ async function fetchRows<T = Record<string, unknown>>(
   const result = await client.query({
     query,
     format: "JSONEachRow",
+    clickhouse_settings: {
+      wait_end_of_query: 1,
+    },
   });
   return await result.json<T>();
 }
@@ -59,6 +101,9 @@ async function fetchCount(client: ClickHouseClient, query: string): Promise<numb
 async function command(client: ClickHouseClient, query: string): Promise<void> {
   await client.command({
     query,
+    clickhouse_settings: {
+      wait_end_of_query: 1,
+    },
   });
 }
 
@@ -179,8 +224,14 @@ async function main() {
     console.log(
       `Backfilling polymarket_trades.timestamp (db=${CLICKHOUSE_DATABASE}, url=${CLICKHOUSE_URL}, rpc_fallback=${options.rpcFallback}, dry_run=${options.dryRun})`,
     );
+    console.log(
+      `Step progress logging interval: ${Math.max(0, Math.floor(STEP_PROGRESS_LOG_MS))}ms (set PM_TRADES_TS_BACKFILL_STEP_PROGRESS_LOG_MS=0 to disable)`,
+    );
 
-    const missingBefore = await countMissingTradeTimestamps(client);
+    const missingBefore = await runStep(
+      "Count missing timestamps before backfill",
+      async () => await countMissingTradeTimestamps(client),
+    );
     if (missingBefore === 0) {
       console.log("No missing timestamps in polymarket_trades; nothing to do.");
       return;
@@ -188,7 +239,10 @@ async function main() {
     console.log(`Missing timestamp rows before backfill: ${missingBefore}`);
 
     if (options.dryRun) {
-      const missingBlocks = await fetchMissingBlocks(client);
+      const missingBlocks = await runStep(
+        "Fetch missing block references",
+        async () => await fetchMissingBlocks(client),
+      );
       console.log(
         `Missing block timestamp references after existing-block join pass: ${missingBlocks.length}`,
       );
@@ -208,10 +262,21 @@ async function main() {
     }
 
     console.log("Applying existing polymarket_blocks timestamps...");
-    await refreshBlocksJoinTable(client);
-    await applyTradeTimestampUpdate(client, joinTableRef);
+    await runStep(
+      "Build polymarket_blocks join table",
+      async () => await refreshBlocksJoinTable(client),
+    );
+    await runStep(
+      "Update polymarket_trades from existing blocks",
+      async () => await applyTradeTimestampUpdate(client, joinTableRef),
+    );
 
-    const missingAfterJoinPass = await countMissingTradeTimestamps(client);
+    const missingAfterJoinPass = await runStep(
+      "Count missing timestamps after existing-block pass",
+      async () => await countMissingTradeTimestamps(client),
+    );
+    const updatedAfterJoinPass = Math.max(0, missingBefore - missingAfterJoinPass);
+    console.log(`Rows updated in existing-block pass: ${updatedAfterJoinPass}`);
     console.log(
       `Missing timestamp rows after existing-block pass: ${missingAfterJoinPass}`,
     );
@@ -222,7 +287,10 @@ async function main() {
       return;
     }
 
-    const missingBlocks = await fetchMissingBlocks(client);
+    const missingBlocks = await runStep(
+      "Fetch block references still missing timestamps",
+      async () => await fetchMissingBlocks(client),
+    );
     if (missingBlocks.length > 0) {
       console.log(
         `Missing block timestamp references: ${missingBlocks.length}`,
@@ -235,27 +303,49 @@ async function main() {
         console.log(
           `Fetching ${missingBlocks.length} block timestamps from RPC with concurrency=${rpcConcurrency}...`,
         );
-        const records = await fetchBlockTimestampsFromRpc(
-          missingBlocks,
-          rpcConcurrency,
+        const records = await runStep(
+          "Fetch missing block timestamps from Polygon RPC",
+          async () => await fetchBlockTimestampsFromRpc(
+            missingBlocks,
+            rpcConcurrency,
+          ),
         );
         if (records.length > 0) {
-          await client.insert({
-            table: "polymarket_blocks",
-            values: records,
-            format: "JSONEachRow",
-          });
+          await runStep(
+            "Insert RPC-fetched block timestamps into polymarket_blocks",
+            async () => await client.insert({
+              table: "polymarket_blocks",
+              values: records,
+              format: "JSONEachRow",
+              clickhouse_settings: {
+                wait_end_of_query: 1,
+              },
+            }),
+          );
           console.log("Applying RPC-fetched block timestamps...");
-          await refreshBlocksJoinTable(client);
-          await applyTradeTimestampUpdate(client, joinTableRef);
+          await runStep(
+            "Rebuild polymarket_blocks join table after RPC insert",
+            async () => await refreshBlocksJoinTable(client),
+          );
+          await runStep(
+            "Update polymarket_trades from RPC-fetched blocks",
+            async () => await applyTradeTimestampUpdate(client, joinTableRef),
+          );
         }
         console.log(
           `Inserted ${records.length} block timestamp rows into polymarket_blocks`,
         );
       }
+    } else if (updatedAfterJoinPass === 0) {
+      console.log(
+        "No rows were updated and no missing block references were found. Verify polymarket_blocks.timestamp is populated and block_number values match polymarket_trades.",
+      );
     }
 
-    const missingAfter = await countMissingTradeTimestamps(client);
+    const missingAfter = await runStep(
+      "Count missing timestamps after full backfill",
+      async () => await countMissingTradeTimestamps(client),
+    );
     const updated = Math.max(0, missingBefore - missingAfter);
     console.log(
       `Backfill complete: updated=${updated}, missing_before=${missingBefore}, missing_after=${missingAfter}`,
