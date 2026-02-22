@@ -38,7 +38,7 @@ async function main() {
 
 main()
   .then(() => {
-    // Force exit to avoid DuckDB NAPI cleanup crash in Bun
+    // Ensure Bun exits after indexer tasks complete.
     process.exit(0);
   })
   .catch((err) => {

@@ -1,10 +1,9 @@
 import { join } from "path";
 import { Indexer } from "../common/indexer";
 import { DATA_DIR as ROOT_DATA_DIR } from "../common/paths";
-import { ParquetStorage } from "../common/storage";
+import { ClickHouseStorage } from "../common/storage";
 import { PolygonClient, POLYMARKET_START_BLOCK } from "./blockchain";
 
-const BLOCKS_DIR = join(ROOT_DATA_DIR, "polymarket/blocks");
 const BUCKET_SIZE = 100_000;
 const SAMPLE_INTERVAL = Number(process.env.PM_BLOCK_SAMPLE_INTERVAL || "20");
 const MAX_WORKERS = 100;
@@ -51,11 +50,8 @@ export class PolymarketBlocksIndexer extends Indexer {
   }
 
   async run(): Promise<void> {
-    const { mkdirSync } = await import("fs");
-    mkdirSync(BLOCKS_DIR, { recursive: true });
-
     const client = new PolygonClient();
-    const storage = new ParquetStorage(BLOCKS_DIR, "blocks");
+    const storage = new ClickHouseStorage("polymarket_blocks");
     try {
       const maxIndexed = await storage.getMaxValue("block_number");
       const lastIndexed = maxIndexed ?? 0;

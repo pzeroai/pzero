@@ -1,11 +1,10 @@
 import { join } from "path";
 import { Indexer } from "../common/indexer";
 import { DATA_DIR as ROOT_DATA_DIR } from "../common/paths";
-import { ParquetStorage } from "../common/storage";
+import { ClickHouseStorage } from "../common/storage";
 import { readCursor, writeCursor } from "../common/cursor";
 import { KalshiClient } from "./client";
 
-const DATA_DIR = join(ROOT_DATA_DIR, "kalshi/markets");
 const STATE_FILE = join(ROOT_DATA_DIR, "kalshi/.markets_state.json");
 const PAGE_LIMIT = Number(process.env.KALSHI_MARKETS_PAGE_LIMIT || "1000");
 const OVERLAP_SECONDS = Number(process.env.KALSHI_MARKETS_OVERLAP_SECONDS || "300");
@@ -110,12 +109,12 @@ function serializeState(state: KalshiMarketsState): string {
 
 export class KalshiMarketsIndexer extends Indexer {
   constructor() {
-    super("kalshi_markets", "Incrementally indexes Kalshi markets data to parquet files");
+    super("kalshi_markets", "Incrementally indexes Kalshi markets data to ClickHouse");
   }
 
   async run(): Promise<void> {
     const client = new KalshiClient();
-    const storage = new ParquetStorage(DATA_DIR, "markets");
+    const storage = new ClickHouseStorage("kalshi_markets");
     let stopRequested = false;
     let forceStopRequested = false;
     let firstStopAt = 0;
