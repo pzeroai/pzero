@@ -130,6 +130,12 @@ function isJoinNotInitializedError(err: unknown): boolean {
     || message.includes("WAITED_FOR_BACKEND_TABLE");
 }
 
+function isUnsupportedJoinPersistentSettingError(err: unknown): boolean {
+  const message = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return message.includes("unknown setting persistent")
+    && message.includes("sharedjoin");
+}
+
 function quoteCompoundIdentifier(name: string): string {
   return name
     .split(".")
@@ -168,21 +174,28 @@ async function waitForJoinTableReady(
 }
 
 async function refreshBlocksJoinTable(client: ClickHouseClient): Promise<void> {
-  await command(client, `DROP TABLE IF EXISTS ${BLOCKS_JOIN_TABLE}`);
-  await command(
-    client,
-    `
+  const createJoinTableQuery = (withPersistentSetting: boolean): string => `
       CREATE TABLE ${BLOCKS_JOIN_TABLE}
       ENGINE = Join(ANY, LEFT, block_number)
-      SETTINGS persistent = 0
+      ${withPersistentSetting ? "SETTINGS persistent = 0" : ""}
       AS
       SELECT
         block_number,
         any(timestamp) AS timestamp
       FROM polymarket_blocks
       GROUP BY block_number
-    `,
-  );
+    `;
+
+  await command(client, `DROP TABLE IF EXISTS ${BLOCKS_JOIN_TABLE}`);
+  try {
+    await command(client, createJoinTableQuery(true));
+  } catch (err) {
+    if (!isUnsupportedJoinPersistentSettingError(err)) throw err;
+    console.warn(
+      "ClickHouse does not support Join table setting `persistent`; retrying without it.",
+    );
+    await command(client, createJoinTableQuery(false));
+  }
 }
 
 async function applyTradeTimestampUpdate(
