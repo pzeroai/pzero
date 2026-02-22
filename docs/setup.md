@@ -49,6 +49,23 @@ bun run migrate-parquet -- --truncate          # clear destination tables first
 bun run migrate-parquet -- --continue-on-error # keep loading other files on failures
 ```
 
+## Backfill Trade Timestamps
+
+If migrated `polymarket_trades` rows have null/empty `timestamp`, backfill from `polymarket_blocks`:
+
+```bash
+bun run backfill-trade-timestamps
+```
+
+Optional flags:
+
+```bash
+bun run backfill-trade-timestamps -- --dry-run
+bun run backfill-trade-timestamps -- --no-rpc-fallback
+```
+
+RPC fallback is enabled by default. It fetches missing block timestamps from Polygon RPC and inserts them into `polymarket_blocks` before backfilling trade rows.
+
 ## Running
 
 ### Development

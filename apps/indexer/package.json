@@ -4,7 +4,8 @@
   "scripts": {
     "index": "bun --env-file=../../.env run src/cli.ts",
     "scheduler": "bun --env-file=../../.env run src/scheduler.ts",
-    "migrate-parquet": "bun --env-file=../../.env run src/migrate-parquet.ts"
+    "migrate-parquet": "bun --env-file=../../.env run src/migrate-parquet.ts",
+    "backfill-trade-timestamps": "bun --env-file=../../.env run src/backfill-trade-timestamps.ts"
   },
   "dependencies": {
     "@clickhouse/client": "^1.12.1",

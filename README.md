@@ -85,6 +85,7 @@ cp .env.example .env
 
 ```bash
 bun run migrate-parquet
+bun run backfill-trade-timestamps
 ```
 
 ### Run
